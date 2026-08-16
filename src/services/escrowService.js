@@ -135,6 +135,35 @@ async function getAgreement(agreementId) {
   return snap.data();
 }
 
+// Lists all agreements where the user is either buyer or seller, newest
+// first. Firestore doesn't support OR queries across different fields in
+// one call, so we run two queries and merge the results.
+async function listForUser(uid) {
+  const [asBuyer, asSeller] = await Promise.all([
+    db
+      .collection(ESCROW_COLLECTION)
+      .where("buyerId", "==", uid)
+      .orderBy("createdAt", "desc")
+      .get(),
+    db
+      .collection(ESCROW_COLLECTION)
+      .where("sellerId", "==", uid)
+      .orderBy("createdAt", "desc")
+      .get(),
+  ]);
+
+  const all = [...asBuyer.docs, ...asSeller.docs].map((doc) => doc.data());
+
+  // De-dupe in the unlikely case a user is somehow both buyer and seller,
+  // and sort the merged list by createdAt descending.
+  const byId = new Map(all.map((a) => [a.id, a]));
+  return Array.from(byId.values()).sort((a, b) => {
+    const aTime = a.createdAt?.toMillis?.() ?? 0;
+    const bTime = b.createdAt?.toMillis?.() ?? 0;
+    return bTime - aTime;
+  });
+}
+
 module.exports = {
   EscrowStatus,
   calculateCommission,
@@ -143,4 +172,5 @@ module.exports = {
   markReleased,
   markDisputed,
   getAgreement,
+  listForUser,
 };

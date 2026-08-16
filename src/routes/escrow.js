@@ -122,6 +122,18 @@ router.post("/agreements/:id/dispute", async (req, res) => {
   }
 });
 
+// GET /escrow/agreements
+// Lists all escrow agreements where the current user is buyer or seller.
+router.get("/agreements", async (req, res) => {
+  try {
+    const agreements = await escrowService.listForUser(req.user.uid);
+    res.json(agreements);
+  } catch (err) {
+    console.error("List agreements failed:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /escrow/agreements/:id
 router.get("/agreements/:id", async (req, res) => {
   try {
