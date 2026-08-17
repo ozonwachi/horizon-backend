@@ -98,25 +98,42 @@ async function markFunded(agreementId, paystackReference) {
   return (await docRef.get()).data();
 }
 
-// Releases funds to the seller. Actual money movement (Paystack transfer)
-// happens in the route handler using paystackService - this just updates
-// the record of truth in Firestore.
+// Releases funds to the seller: moves the agreement to "released" and
+// credits the seller's in-app wallet balance by the item amount (the
+// commission was already collected separately from the buyer's payment,
+// so the seller receives the full amountKobo). This does NOT send real
+// money anywhere yet - actual payout happens later when the seller
+// requests a withdrawal and it's paid out manually (see walletService.js).
 async function markReleased(agreementId) {
   const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
-  const snap = await docRef.get();
-  if (!snap.exists) throw new Error("Agreement not found");
-  const data = snap.data();
 
-  if (data.status !== EscrowStatus.FUNDED) {
-    throw new Error(`Cannot release from status "${data.status}"`);
-  }
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(docRef);
+    if (!snap.exists) throw new Error("Agreement not found");
+    const data = snap.data();
 
-  await docRef.update({
-    status: EscrowStatus.RELEASED,
-    releasedAt: admin.firestore.FieldValue.serverTimestamp(),
-    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    if (data.status !== EscrowStatus.FUNDED) {
+      throw new Error(`Cannot release from status "${data.status}"`);
+    }
+
+    tx.update(docRef, {
+      status: EscrowStatus.RELEASED,
+      releasedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const walletRef = db.collection("wallets").doc(data.sellerId);
+    tx.set(
+      walletRef,
+      {
+        balanceKobo: admin.firestore.FieldValue.increment(data.amountKobo),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    return { ...data, status: EscrowStatus.RELEASED };
   });
-  return (await docRef.get()).data();
 }
 
 async function markDisputed(agreementId, reason) {

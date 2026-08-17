@@ -5,6 +5,7 @@ const cors = require("cors");
 const helmet = require("helmet");
 
 const escrowRoutes = require("./routes/escrow");
+const walletRoutes = require("./routes/wallet");
 const paystackWebhookRoutes = require("./routes/paystackWebhook");
 
 const app = express();
@@ -34,6 +35,7 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/escrow", escrowRoutes);
+app.use("/wallet", walletRoutes);
 
 // Catch-all error handler
 app.use((err, req, res, next) => {
