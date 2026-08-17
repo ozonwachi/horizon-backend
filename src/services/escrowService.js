@@ -3,8 +3,6 @@ const { db, admin } = require("../config/firebaseAdmin");
 const ESCROW_COLLECTION = "escrowAgreements";
 const COMMISSION_COLLECTION = "commissionRules";
 
-// Statuses an EscrowAgreement can move through. Keep this centralized so
-// the Flutter app and backend agree on the same string values.
 const EscrowStatus = {
   PENDING_PAYMENT: "pending_payment",
   FUNDED: "funded",
@@ -14,9 +12,6 @@ const EscrowStatus = {
   CANCELLED: "cancelled",
 };
 
-// Looks up the applicable CommissionRule for a given type/category and
-// computes the commission in kobo. Falls back to 0 if no rule matches -
-// tune this default to whatever makes sense once real rules exist.
 async function calculateCommission({ type, category, amountKobo }) {
   const snapshot = await db
     .collection(COMMISSION_COLLECTION)
@@ -35,7 +30,6 @@ async function calculateCommission({ type, category, amountKobo }) {
   if (rule.mode === "percentage") {
     commissionKobo = Math.round((amountKobo * rule.value) / 100);
   } else {
-    // flat, already stored in kobo
     commissionKobo = rule.value;
   }
 
@@ -45,17 +39,14 @@ async function calculateCommission({ type, category, amountKobo }) {
   return { commissionKobo, rule };
 }
 
-// Creates a new EscrowAgreement in pending_payment state. The commission is
-// locked in at creation time (per your build notes) so later CommissionRule
-// changes don't retroactively affect deals already in progress.
 async function createAgreement({
   buyerId,
   sellerId,
-  type, // "listing" | "job" | "barter" | custom
+  type,
   category,
   amountKobo,
-  terms, // free-form object: simple release-on-confirmation or custom conditions
-  referenceId, // id of the listing/job/barter this escrow is tied to
+  terms,
+  referenceId,
 }) {
   const { commissionKobo, rule } = await calculateCommission({
     type,
@@ -85,9 +76,6 @@ async function createAgreement({
   return agreement;
 }
 
-// Marks an agreement funded once Paystack verification succeeds. Called
-// from the webhook handler or the verify-after-redirect route - never from
-// a route that just trusts client input.
 async function markFunded(agreementId, paystackReference) {
   const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
   await docRef.update({
@@ -98,12 +86,6 @@ async function markFunded(agreementId, paystackReference) {
   return (await docRef.get()).data();
 }
 
-// Releases funds to the seller: moves the agreement to "released" and
-// credits the seller's in-app wallet balance by the item amount (the
-// commission was already collected separately from the buyer's payment,
-// so the seller receives the full amountKobo). This does NOT send real
-// money anywhere yet - actual payout happens later when the seller
-// requests a withdrawal and it's paid out manually (see walletService.js).
 async function markReleased(agreementId) {
   const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
 
@@ -152,9 +134,52 @@ async function getAgreement(agreementId) {
   return snap.data();
 }
 
-// Lists all agreements where the user is either buyer or seller, newest
-// first. Firestore doesn't support OR queries across different fields in
-// one call, so we run two queries and merge the results.
+async function payFromWallet(agreementId, buyerUid) {
+  const agreementRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
+  const walletRef = db.collection("wallets").doc(buyerUid);
+
+  return db.runTransaction(async (tx) => {
+    const agreementSnap = await tx.get(agreementRef);
+    if (!agreementSnap.exists) throw new Error("Agreement not found");
+    const agreement = agreementSnap.data();
+
+    if (agreement.buyerId !== buyerUid) {
+      throw new Error("Not your agreement");
+    }
+    if (agreement.status !== EscrowStatus.PENDING_PAYMENT) {
+      throw new Error(`Cannot pay from status "${agreement.status}"`);
+    }
+
+    const walletSnap = await tx.get(walletRef);
+    const balanceKobo = walletSnap.exists
+      ? walletSnap.data().balanceKobo || 0
+      : 0;
+    const totalKobo = agreement.amountKobo + agreement.commissionKobo;
+
+    if (balanceKobo < totalKobo) {
+      throw new Error("Insufficient wallet balance");
+    }
+
+    tx.set(
+      walletRef,
+      {
+        balanceKobo: admin.firestore.FieldValue.increment(-totalKobo),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    tx.update(agreementRef, {
+      status: EscrowStatus.FUNDED,
+      paystackReference: null,
+      paymentMethod: "wallet",
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return { ...agreement, status: EscrowStatus.FUNDED, paymentMethod: "wallet" };
+  });
+}
+
 async function listForUser(uid) {
   const [asBuyer, asSeller] = await Promise.all([
     db
@@ -171,8 +196,6 @@ async function listForUser(uid) {
 
   const all = [...asBuyer.docs, ...asSeller.docs].map((doc) => doc.data());
 
-  // De-dupe in the unlikely case a user is somehow both buyer and seller,
-  // and sort the merged list by createdAt descending.
   const byId = new Map(all.map((a) => [a.id, a]));
   return Array.from(byId.values()).sort((a, b) => {
     const aTime = a.createdAt?.toMillis?.() ?? 0;
@@ -189,5 +212,6 @@ module.exports = {
   markReleased,
   markDisputed,
   getAgreement,
+  payFromWallet,
   listForUser,
 };

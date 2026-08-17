@@ -7,8 +7,6 @@ const { auth: firebaseAuth } = require("../config/firebaseAdmin");
 const router = express.Router();
 router.use(requireAuth);
 
-// POST /escrow/agreements
-// Buyer creates an escrow agreement for a listing/job/barter before paying.
 router.post("/agreements", async (req, res) => {
   try {
     const { sellerId, type, category, amountKobo, terms, referenceId } = req.body;
@@ -36,9 +34,6 @@ router.post("/agreements", async (req, res) => {
   }
 });
 
-// POST /escrow/agreements/:id/pay
-// Starts the Paystack transaction for an existing agreement. Returns the
-// authorization_url the Flutter app opens (via webview or browser launcher).
 router.post("/agreements/:id/pay", async (req, res) => {
   try {
     const agreement = await escrowService.getAgreement(req.params.id);
@@ -64,9 +59,16 @@ router.post("/agreements/:id/pay", async (req, res) => {
   }
 });
 
-// POST /escrow/agreements/:id/verify
-// Fallback route the app can call after redirect if you're not relying
-// solely on the webhook (webhook is still the source of truth in prod).
+router.post("/agreements/:id/pay-with-wallet", async (req, res) => {
+  try {
+    const updated = await escrowService.payFromWallet(req.params.id, req.user.uid);
+    res.json(updated);
+  } catch (err) {
+    console.error("Pay with wallet failed:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
 router.post("/agreements/:id/verify", async (req, res) => {
   try {
     const { reference } = req.body;
@@ -85,10 +87,6 @@ router.post("/agreements/:id/verify", async (req, res) => {
   }
 });
 
-// POST /escrow/agreements/:id/release
-// Buyer confirms receipt/completion -> releases funds to seller.
-// TODO: once seller payout details (bank account) are collected, wire this
-// to paystackService.createTransferRecipient + initiateTransfer.
 router.post("/agreements/:id/release", async (req, res) => {
   try {
     const agreement = await escrowService.getAgreement(req.params.id);
@@ -105,7 +103,6 @@ router.post("/agreements/:id/release", async (req, res) => {
   }
 });
 
-// POST /escrow/agreements/:id/dispute
 router.post("/agreements/:id/dispute", async (req, res) => {
   try {
     const agreement = await escrowService.getAgreement(req.params.id);
@@ -122,8 +119,6 @@ router.post("/agreements/:id/dispute", async (req, res) => {
   }
 });
 
-// GET /escrow/agreements
-// Lists all escrow agreements where the current user is buyer or seller.
 router.get("/agreements", async (req, res) => {
   try {
     const agreements = await escrowService.listForUser(req.user.uid);
@@ -134,7 +129,6 @@ router.get("/agreements", async (req, res) => {
   }
 });
 
-// GET /escrow/agreements/:id
 router.get("/agreements/:id", async (req, res) => {
   try {
     const agreement = await escrowService.getAgreement(req.params.id);

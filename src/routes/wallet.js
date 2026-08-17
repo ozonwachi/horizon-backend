@@ -1,11 +1,11 @@
 const express = require("express");
 const { requireAuth } = require("../middleware/auth");
 const walletService = require("../services/walletService");
+const { auth: firebaseAuth } = require("../config/firebaseAdmin");
 
 const router = express.Router();
 router.use(requireAuth);
 
-// GET /wallet/balance
 router.get("/balance", async (req, res) => {
   try {
     const balanceKobo = await walletService.getBalance(req.user.uid);
@@ -16,11 +16,40 @@ router.get("/balance", async (req, res) => {
   }
 });
 
-// POST /wallet/withdrawals
-// Seller requests a payout. Deducts from their balance immediately so it
-// can't be requested twice; you pay them manually outside the app and
-// then mark the request paid (see markWithdrawalPaid - no admin UI yet,
-// call it from a quick script or Firestore console update for now).
+router.post("/deposits", async (req, res) => {
+  try {
+    const { amountKobo } = req.body;
+    const user = await firebaseAuth.getUser(req.user.uid);
+
+    const result = await walletService.initiateDeposit({
+      uid: req.user.uid,
+      email: user.email,
+      amountKobo,
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error("Deposit init failed:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.post("/deposits/verify", async (req, res) => {
+  try {
+    const { reference } = req.body;
+    if (!reference) return res.status(400).json({ error: "reference is required" });
+
+    const result = await walletService.verifyDeposit({
+      uid: req.user.uid,
+      reference,
+    });
+    res.json(result);
+  } catch (err) {
+    console.error("Deposit verify failed:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
 router.post("/withdrawals", async (req, res) => {
   try {
     const { amountKobo, bankName, accountNumber, accountName } = req.body;
@@ -38,7 +67,6 @@ router.post("/withdrawals", async (req, res) => {
   }
 });
 
-// GET /wallet/withdrawals
 router.get("/withdrawals", async (req, res) => {
   try {
     const requests = await walletService.listWithdrawalsForUser(req.user.uid);
