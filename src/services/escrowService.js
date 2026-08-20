@@ -266,7 +266,7 @@ async function markReleased(agreementId) {
             tranches: data.tranches.map((t) => ({
               ...t,
               status: TrancheStatus.RELEASED,
-              releasedAt: admin.firestore.FieldValue.serverTimestamp(),
+              releasedAt: admin.firestore.Timestamp.now(),
             })),
           }
         : {}),
@@ -305,7 +305,7 @@ async function _releaseTrancheInTransaction(tx, docRef, data, trancheId) {
   updatedTranches[index] = {
     ...tranche,
     status: TrancheStatus.RELEASED,
-    releasedAt: admin.firestore.FieldValue.serverTimestamp(),
+    releasedAt: admin.firestore.Timestamp.now(),
   };
 
   const walletRef = db.collection("wallets").doc(data.sellerId);
@@ -483,7 +483,7 @@ async function adminResolveTranche(agreementId, trancheId, outcome) {
       updatedTranches[index] = {
         ...tranche,
         status: TrancheStatus.REFUNDED,
-        releasedAt: admin.firestore.FieldValue.serverTimestamp(),
+        releasedAt: admin.firestore.Timestamp.now(),
       };
 
       const walletRef = db.collection("wallets").doc(data.buyerId);
@@ -567,7 +567,7 @@ async function flagOverdueTranches() {
           if (ms <= nowMillis) {
             changed = true;
             results.flagged += 1;
-            return { ...t, overdueFlaggedAt: admin.firestore.FieldValue.serverTimestamp() };
+            return { ...t, overdueFlaggedAt: admin.firestore.Timestamp.now() };
           }
           return t;
         });
