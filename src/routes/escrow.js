@@ -5,11 +5,49 @@ const paystackService = require("../services/paystackService");
 const { auth: firebaseAuth } = require("../config/firebaseAdmin");
 
 const router = express.Router();
+
+// ---------------------------------------------------------------------------
+// Internal cron endpoint - NOT behind requireAuth (Render Cron has no
+// Firebase user token to send). Protected instead by a shared secret set as
+// an env var on both the web service and the cron job. Must be registered
+// BEFORE `router.use(requireAuth)` below, since that applies to every route
+// declared after it.
+//
+// Set CRON_SECRET in horizon-backend's Render environment variables, and
+// pass the same value as a header from the Render Cron Job's command, e.g.:
+//   curl -X POST https://horizon-backend-ufve.onrender.com/escrow/internal/flag-overdue-tranches \
+//     -H "x-cron-secret: $CRON_SECRET"
+// ---------------------------------------------------------------------------
+router.post("/internal/flag-overdue-tranches", async (req, res) => {
+  const provided = req.header("x-cron-secret");
+  if (!provided || provided !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const results = await escrowService.flagOverdueTranches();
+    res.json(results);
+  } catch (err) {
+    console.error("flagOverdueTranches failed:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.use(requireAuth);
 
 router.post("/agreements", async (req, res) => {
   try {
-    const { sellerId, type, category, amountKobo, terms, referenceId } = req.body;
+    const {
+      sellerId,
+      type,
+      category,
+      amountKobo,
+      terms,
+      referenceId,
+      title,
+      description,
+      tranches,
+    } = req.body;
 
     if (!sellerId || !type || !amountKobo) {
       return res
@@ -25,12 +63,15 @@ router.post("/agreements", async (req, res) => {
       amountKobo,
       terms,
       referenceId,
+      title,
+      description,
+      tranches,
     });
 
     res.status(201).json(agreement);
   } catch (err) {
     console.error("Create agreement failed:", err);
-    res.status(500).json({ error: err.message });
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -87,6 +128,8 @@ router.post("/agreements/:id/verify", async (req, res) => {
   }
 });
 
+// Legacy whole-agreement release - only valid for old single-tranche
+// agreements. New tranche-based agreements use /release-tranche below.
 router.post("/agreements/:id/release", async (req, res) => {
   try {
     const agreement = await escrowService.getAgreement(req.params.id);
@@ -99,10 +142,62 @@ router.post("/agreements/:id/release", async (req, res) => {
     res.json(updated);
   } catch (err) {
     console.error("Release failed:", err);
-    res.status(500).json({ error: err.message });
+    res.status(400).json({ error: err.message });
   }
 });
 
+// Buyer confirms and releases a specific tranche. Works whether the
+// tranche is a plain buyer_confirmation tranche, or a timed tranche the
+// buyer wants to release early / after its window has passed - the timer
+// only ever makes a tranche eligible, never releases it by itself.
+router.post("/agreements/:id/tranches/:trancheId/release", async (req, res) => {
+  try {
+    const updated = await escrowService.confirmTrancheRelease(
+      req.params.id,
+      req.params.trancheId,
+      req.user.uid
+    );
+    res.json(updated);
+  } catch (err) {
+    console.error("Tranche release failed:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Seller marks a milestone reached (e.g. "delivered"), starting the
+// countdown for a timed_from_milestone tranche.
+router.post("/agreements/:id/tranches/:trancheId/milestone", async (req, res) => {
+  try {
+    const updated = await escrowService.markMilestoneReached(
+      req.params.id,
+      req.params.trancheId,
+      req.user.uid
+    );
+    res.json(updated);
+  } catch (err) {
+    console.error("Mark milestone failed:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Dispute a specific tranche (blocks only that tranche; others keep
+// flowing normally). Either buyer or seller can raise this.
+router.post("/agreements/:id/tranches/:trancheId/dispute", async (req, res) => {
+  try {
+    const updated = await escrowService.disputeTranche(
+      req.params.id,
+      req.params.trancheId,
+      req.body.reason,
+      req.user.uid
+    );
+    res.json(updated);
+  } catch (err) {
+    console.error("Tranche dispute failed:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Legacy whole-agreement dispute (old agreements without tranches).
 router.post("/agreements/:id/dispute", async (req, res) => {
   try {
     const agreement = await escrowService.getAgreement(req.params.id);
