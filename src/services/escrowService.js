@@ -1,7 +1,15 @@
 const { db, admin } = require("../config/firebaseAdmin");
+const { notifyUser } = require("./notificationService");
+const { recordAuditLog } = require("./auditLogService");
 
 const ESCROW_COLLECTION = "escrowAgreements";
 const COMMISSION_COLLECTION = "commissionRules";
+
+// Fields a generic admin edit (adminUpdateAgreement) is allowed to touch.
+// Status transitions have their own dedicated, invariant-preserving
+// functions (markFunded, markReleased, adminResolveTranche, cancel*) and are
+// deliberately excluded here.
+const ADMIN_EDITABLE_FIELDS = ["amountKobo", "commissionKobo", "title", "description"];
 
 const EscrowStatus = {
   PENDING_PAYMENT: "pending_payment",
@@ -178,6 +186,20 @@ async function createAgreement({
   };
 
   await docRef.set(agreement);
+
+  // Item 6: notify the other party that a deal was opened. The buyer
+  // already knows (they just created it) - it's the seller who needs the
+  // heads up.
+  await notifyUser(sellerId, {
+    type: "escrow_opened",
+    title: "New escrow deal opened",
+    body: title
+      ? `An escrow agreement for "${title}" was opened with you.`
+      : "An escrow agreement was opened with you.",
+    relatedType: "escrow",
+    relatedId: agreement.id,
+  }).catch((err) => console.error("notifyUser (escrow_opened) failed:", err));
+
   return agreement;
 }
 
@@ -204,7 +226,7 @@ function activateTranchesOnFunding(tranches, fundedAtMillis) {
 async function markFunded(agreementId, paystackReference) {
   const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
 
-  return db.runTransaction(async (tx) => {
+  const result = await db.runTransaction(async (tx) => {
     const snap = await tx.get(docRef);
     if (!snap.exists) throw new Error("Agreement not found");
     const data = snap.data();
@@ -232,6 +254,16 @@ async function markFunded(agreementId, paystackReference) {
     tx.update(docRef, update);
     return { ...data, ...update };
   });
+
+  await notifyUser(result.sellerId, {
+    type: "escrow_funded",
+    title: "Escrow deal funded",
+    body: "The buyer has funded your escrow agreement.",
+    relatedType: "escrow",
+    relatedId: agreementId,
+  }).catch((err) => console.error("notifyUser (escrow_funded) failed:", err));
+
+  return result;
 }
 
 // Legacy whole-agreement release. Kept unchanged for old agreements with no
@@ -242,7 +274,7 @@ async function markFunded(agreementId, paystackReference) {
 async function markReleased(agreementId) {
   const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
 
-  return db.runTransaction(async (tx) => {
+  const result = await db.runTransaction(async (tx) => {
     const snap = await tx.get(docRef);
     if (!snap.exists) throw new Error("Agreement not found");
     const data = snap.data();
@@ -284,6 +316,16 @@ async function markReleased(agreementId) {
 
     return { ...data, status: EscrowStatus.RELEASED };
   });
+
+  await notifyUser(result.sellerId, {
+    type: "escrow_released",
+    title: "Escrow funds released",
+    body: "The buyer released the escrow funds to you.",
+    relatedType: "escrow",
+    relatedId: agreementId,
+  }).catch((err) => console.error("notifyUser (escrow_released) failed:", err));
+
+  return result;
 }
 
 // Core tranche release logic, shared by confirmTrancheRelease (buyer-driven)
@@ -339,8 +381,9 @@ async function _releaseTrancheInTransaction(tx, docRef, data, trancheId) {
 // than waiting for the timer).
 async function confirmTrancheRelease(agreementId, trancheId, buyerUid) {
   const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
+  let sellerId = null;
 
-  return db.runTransaction(async (tx) => {
+  const result = await db.runTransaction(async (tx) => {
     const snap = await tx.get(docRef);
     if (!snap.exists) throw new Error("Agreement not found");
     const data = snap.data();
@@ -353,9 +396,21 @@ async function confirmTrancheRelease(agreementId, trancheId, buyerUid) {
       throw new Error(`Cannot release from status "${data.status}"`);
     }
 
-    const result = await _releaseTrancheInTransaction(tx, docRef, data, trancheId);
-    return result;
+    sellerId = data.sellerId;
+    return _releaseTrancheInTransaction(tx, docRef, data, trancheId);
   });
+
+  if (sellerId && !result.alreadyReleased) {
+    await notifyUser(sellerId, {
+      type: "escrow_released",
+      title: "Escrow tranche released",
+      body: "The buyer released a tranche of escrow funds to you.",
+      relatedType: "escrow",
+      relatedId: agreementId,
+    }).catch((err) => console.error("notifyUser (tranche release) failed:", err));
+  }
+
+  return result;
 }
 
 // Seller marks a milestone reached (e.g. "delivered"), which starts the
@@ -363,13 +418,15 @@ async function confirmTrancheRelease(agreementId, trancheId, buyerUid) {
 // tranches with that release condition type.
 async function markMilestoneReached(agreementId, trancheId, sellerUid) {
   const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
+  let buyerId = null;
 
-  return db.runTransaction(async (tx) => {
+  const result = await db.runTransaction(async (tx) => {
     const snap = await tx.get(docRef);
     if (!snap.exists) throw new Error("Agreement not found");
     const data = snap.data();
 
     if (data.sellerId !== sellerUid) throw new Error("Not your agreement");
+    buyerId = data.buyerId;
 
     const tranches = data.tranches || [];
     const index = tranches.findIndex((t) => t.id === trancheId);
@@ -407,6 +464,18 @@ async function markMilestoneReached(agreementId, trancheId, sellerUid) {
 
     return updatedTranches[index];
   });
+
+  if (buyerId) {
+    await notifyUser(buyerId, {
+      type: "escrow_milestone",
+      title: "Milestone reached",
+      body: "The other party marked a milestone reached - a release countdown has started.",
+      relatedType: "escrow",
+      relatedId: agreementId,
+    }).catch((err) => console.error("notifyUser (escrow_milestone) failed:", err));
+  }
+
+  return result;
 }
 
 // Either party disputes a specific tranche. This blocks ONLY that tranche
@@ -415,8 +484,9 @@ async function markMilestoneReached(agreementId, trancheId, sellerUid) {
 // level so it surfaces in an admin queue; resolve via adminResolveTranche.
 async function disputeTranche(agreementId, trancheId, reason, actorUid) {
   const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
+  let otherPartyId = null;
 
-  return db.runTransaction(async (tx) => {
+  const result = await db.runTransaction(async (tx) => {
     const snap = await tx.get(docRef);
     if (!snap.exists) throw new Error("Agreement not found");
     const data = snap.data();
@@ -424,6 +494,7 @@ async function disputeTranche(agreementId, trancheId, reason, actorUid) {
     if (data.buyerId !== actorUid && data.sellerId !== actorUid) {
       throw new Error("Not a party to this agreement");
     }
+    otherPartyId = data.buyerId === actorUid ? data.sellerId : data.buyerId;
 
     const tranches = data.tranches || [];
     const index = tranches.findIndex((t) => t.id === trancheId);
@@ -449,6 +520,20 @@ async function disputeTranche(agreementId, trancheId, reason, actorUid) {
 
     return updatedTranches[index];
   });
+
+  if (otherPartyId) {
+    await notifyUser(otherPartyId, {
+      type: "escrow_disputed",
+      title: "Escrow tranche disputed",
+      body: reason
+        ? `A tranche was disputed: ${reason}`
+        : "A tranche on your escrow agreement was disputed.",
+      relatedType: "escrow",
+      relatedId: agreementId,
+    }).catch((err) => console.error("notifyUser (escrow_disputed) failed:", err));
+  }
+
+  return result;
 }
 
 // Minimal admin resolution path so a disputed tranche isn't a dead end.
@@ -459,11 +544,15 @@ async function disputeTranche(agreementId, trancheId, reason, actorUid) {
 // verified the actor is an admin.
 async function adminResolveTranche(agreementId, trancheId, outcome) {
   const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
+  let buyerId = null;
+  let sellerId = null;
 
-  return db.runTransaction(async (tx) => {
+  const result = await db.runTransaction(async (tx) => {
     const snap = await tx.get(docRef);
     if (!snap.exists) throw new Error("Agreement not found");
     const data = snap.data();
+    buyerId = data.buyerId;
+    sellerId = data.sellerId;
 
     const tranches = data.tranches || [];
     const index = tranches.findIndex((t) => t.id === trancheId);
@@ -516,6 +605,25 @@ async function adminResolveTranche(agreementId, trancheId, outcome) {
 
     throw new Error(`Unknown outcome "${outcome}"`);
   });
+
+  const notifyTargets =
+    outcome === "refund" ? [buyerId] : [sellerId, buyerId].filter(Boolean);
+  await Promise.all(
+    notifyTargets.map((uid) =>
+      notifyUser(uid, {
+        type: "escrow_dispute_resolved",
+        title: "Escrow dispute resolved",
+        body:
+          outcome === "refund"
+            ? "An admin resolved your dispute and issued a refund."
+            : "An admin resolved the dispute and released the tranche to the seller.",
+        relatedType: "escrow",
+        relatedId: agreementId,
+      }).catch((err) => console.error("notifyUser (dispute resolved) failed:", err))
+    )
+  );
+
+  return result;
 }
 
 // Cron entrypoint - see routes/escrow.js for the internal, secret-protected
@@ -587,14 +695,32 @@ async function flagOverdueTranches() {
   return results;
 }
 
-async function markDisputed(agreementId, reason) {
+async function markDisputed(agreementId, reason, actorUid) {
   const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
   await docRef.update({
     status: EscrowStatus.DISPUTED,
     disputeReason: reason || null,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
-  return (await docRef.get()).data();
+  const updated = (await docRef.get()).data();
+
+  const otherPartyId =
+    actorUid && updated.buyerId === actorUid
+      ? updated.sellerId
+      : actorUid && updated.sellerId === actorUid
+      ? updated.buyerId
+      : null;
+  if (otherPartyId) {
+    await notifyUser(otherPartyId, {
+      type: "escrow_disputed",
+      title: "Escrow agreement disputed",
+      body: reason ? `Your escrow agreement was disputed: ${reason}` : "Your escrow agreement was disputed.",
+      relatedType: "escrow",
+      relatedId: agreementId,
+    }).catch((err) => console.error("notifyUser (escrow_disputed) failed:", err));
+  }
+
+  return updated;
 }
 
 async function getAgreement(agreementId) {
@@ -607,7 +733,7 @@ async function payFromWallet(agreementId, buyerUid) {
   const agreementRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
   const walletRef = db.collection("wallets").doc(buyerUid);
 
-  return db.runTransaction(async (tx) => {
+  const result = await db.runTransaction(async (tx) => {
     const agreementSnap = await tx.get(agreementRef);
     if (!agreementSnap.exists) throw new Error("Agreement not found");
     const agreement = agreementSnap.data();
@@ -661,6 +787,16 @@ async function payFromWallet(agreementId, buyerUid) {
 
     return { ...agreement, ...update };
   });
+
+  await notifyUser(result.sellerId, {
+    type: "escrow_funded",
+    title: "Escrow deal funded",
+    body: "The buyer funded your escrow agreement from their wallet.",
+    relatedType: "escrow",
+    relatedId: agreementId,
+  }).catch((err) => console.error("notifyUser (escrow_funded) failed:", err));
+
+  return result;
 }
 
 async function listForUser(uid) {
@@ -687,6 +823,206 @@ async function listForUser(uid) {
   });
 }
 
+// Item 2: buyer can cancel unilaterally before the deal is funded; once
+// funded (or partially released), cancelling requires both parties to
+// agree - whoever calls this first "requests" the cancellation, and the
+// other party's call to this same function confirms it and actually
+// unwinds the deal, refunding any still-unreleased tranche funds back to
+// the buyer's wallet. Already-released tranches are not clawed back.
+async function requestOrConfirmCancel(agreementId, actorUid) {
+  const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
+  let notify = null; // { targetUid, type, title, body }
+
+  const result = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(docRef);
+    if (!snap.exists) throw new Error("Agreement not found");
+    const data = snap.data();
+
+    if (data.buyerId !== actorUid && data.sellerId !== actorUid) {
+      throw new Error("Not a party to this agreement");
+    }
+    const otherPartyId = data.buyerId === actorUid ? data.sellerId : data.buyerId;
+
+    const TERMINAL = [
+      EscrowStatus.DISPUTED,
+      EscrowStatus.RELEASED,
+      EscrowStatus.REFUNDED,
+      EscrowStatus.CANCELLED,
+    ];
+    if (TERMINAL.includes(data.status)) {
+      throw new Error(`Cannot cancel from status "${data.status}"`);
+    }
+
+    if (data.status === EscrowStatus.PENDING_PAYMENT) {
+      if (data.buyerId !== actorUid) {
+        throw new Error("Only the buyer can cancel before the deal is funded");
+      }
+      tx.update(docRef, {
+        status: EscrowStatus.CANCELLED,
+        cancelRequestedBy: actorUid,
+        cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      notify = {
+        targetUid: otherPartyId,
+        type: "escrow_cancelled",
+        title: "Escrow deal cancelled",
+        body: "The buyer cancelled this escrow agreement before it was funded.",
+      };
+      return { ...data, status: EscrowStatus.CANCELLED, cancelRequestedBy: actorUid };
+    }
+
+    // FUNDED or PARTIALLY_RELEASED - needs mutual confirmation.
+    if (!data.cancelRequestedBy) {
+      tx.update(docRef, {
+        cancelRequestedBy: actorUid,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      notify = {
+        targetUid: otherPartyId,
+        type: "escrow_cancel_requested",
+        title: "Cancellation requested",
+        body: "The other party requested to cancel this funded escrow agreement. Confirm to proceed.",
+      };
+      return { ...data, cancelRequestedBy: actorUid, awaitingConfirmation: true };
+    }
+
+    if (data.cancelRequestedBy === actorUid) {
+      throw new Error(
+        "You already requested cancellation - waiting for the other party to confirm"
+      );
+    }
+
+    // The other party is now confirming - refund any still-pending tranche
+    // amounts back to the buyer's wallet and mark the agreement cancelled.
+    const tranches = data.tranches || [];
+    let refundKobo = 0;
+    const updatedTranches = tranches.map((t) => {
+      if (t.status === TrancheStatus.PENDING) {
+        refundKobo += t.amountKobo;
+        return {
+          ...t,
+          status: TrancheStatus.REFUNDED,
+          releasedAt: admin.firestore.Timestamp.now(),
+        };
+      }
+      return t;
+    });
+
+    if (refundKobo > 0) {
+      const walletRef = db.collection("wallets").doc(data.buyerId);
+      tx.set(
+        walletRef,
+        {
+          balanceKobo: admin.firestore.FieldValue.increment(refundKobo),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
+
+    tx.update(docRef, {
+      status: EscrowStatus.CANCELLED,
+      tranches: updatedTranches,
+      cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    notify = {
+      targetUid: otherPartyId,
+      type: "escrow_cancelled",
+      title: "Escrow deal cancelled",
+      body: "Both parties confirmed cancellation - any unreleased funds have been refunded to the buyer.",
+    };
+
+    return { ...data, status: EscrowStatus.CANCELLED, tranches: updatedTranches };
+  });
+
+  if (notify) {
+    await notifyUser(notify.targetUid, {
+      type: notify.type,
+      title: notify.title,
+      body: notify.body,
+      relatedType: "escrow",
+      relatedId: agreementId,
+    }).catch((err) => console.error(`notifyUser (${notify.type}) failed:`, err));
+  }
+
+  return result;
+}
+
+// Item 3/4: generic admin override so an admin can correct escrow metadata
+// (amount/commission/title/description) for exceptional cases the normal
+// flows don't cover - e.g. a job-escrow dispute where the skillsman already
+// spent money on transport and the amount needs adjusting. Every call must
+// include a reason and is written to the audit log. Blocked once the
+// agreement is settled (released/refunded/cancelled) to avoid silently
+// desyncing amountKobo from tranches that already reflect a different
+// total - for a settled agreement, resolve at the tranche level instead via
+// disputeTranche + adminResolveTranche.
+async function adminUpdateAgreement(agreementId, adminUid, changes, reason) {
+  if (!reason) throw new Error("reason is required for an admin edit");
+
+  const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
+  const snap = await docRef.get();
+  if (!snap.exists) throw new Error("Agreement not found");
+  const data = snap.data();
+
+  const EDIT_BLOCKED_STATUSES = [
+    EscrowStatus.RELEASED,
+    EscrowStatus.REFUNDED,
+    EscrowStatus.CANCELLED,
+  ];
+  const editingMoney = "amountKobo" in changes || "commissionKobo" in changes;
+  if (editingMoney && EDIT_BLOCKED_STATUSES.includes(data.status)) {
+    throw new Error(`Cannot edit amounts on an agreement with status "${data.status}"`);
+  }
+
+  const update = {};
+  const previousValue = {};
+  const newValue = {};
+  for (const field of ADMIN_EDITABLE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(changes, field)) {
+      update[field] = changes[field];
+      previousValue[field] = data[field] ?? null;
+      newValue[field] = changes[field];
+    }
+  }
+
+  if (Object.keys(update).length === 0) {
+    throw new Error("No editable fields provided");
+  }
+
+  update.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+  await docRef.update(update);
+
+  await recordAuditLog({
+    userId: adminUid,
+    action: "escrow_admin_update",
+    targetType: "escrowAgreement",
+    targetId: agreementId,
+    previousValue,
+    newValue,
+    reason,
+  });
+
+  await Promise.all(
+    [data.buyerId, data.sellerId]
+      .filter(Boolean)
+      .map((uid) =>
+        notifyUser(uid, {
+          type: "escrow_admin_update",
+          title: "Escrow agreement updated by admin",
+          body: `An admin updated this agreement: ${reason}`,
+          relatedType: "escrow",
+          relatedId: agreementId,
+        }).catch((err) => console.error("notifyUser (escrow_admin_update) failed:", err))
+      )
+  );
+
+  return (await docRef.get()).data();
+}
+
 module.exports = {
   EscrowStatus,
   TrancheStatus,
@@ -704,4 +1040,6 @@ module.exports = {
   disputeTranche,
   adminResolveTranche,
   flagOverdueTranches,
+  requestOrConfirmCancel,
+  adminUpdateAgreement,
 };

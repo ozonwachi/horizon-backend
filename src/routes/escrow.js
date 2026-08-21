@@ -1,5 +1,5 @@
 const express = require("express");
-const { requireAuth } = require("../middleware/auth");
+const { requireAuth, requireAdmin } = require("../middleware/auth");
 const escrowService = require("../services/escrowService");
 const paystackService = require("../services/paystackService");
 const { auth: firebaseAuth } = require("../config/firebaseAdmin");
@@ -206,11 +206,47 @@ router.post("/agreements/:id/dispute", async (req, res) => {
       return res.status(403).json({ error: "Not a party to this agreement" });
     }
 
-    const updated = await escrowService.markDisputed(req.params.id, req.body.reason);
+    const updated = await escrowService.markDisputed(
+      req.params.id,
+      req.body.reason,
+      req.user.uid
+    );
     res.json(updated);
   } catch (err) {
     console.error("Dispute failed:", err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Item 2: buyer can cancel unilaterally before funding; once funded, this
+// requires a matching call from the other party to actually take effect
+// (see requestOrConfirmCancel's doc comment in escrowService.js).
+router.post("/agreements/:id/cancel", async (req, res) => {
+  try {
+    const updated = await escrowService.requestOrConfirmCancel(req.params.id, req.user.uid);
+    res.json(updated);
+  } catch (err) {
+    console.error("Cancel failed:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Item 3/4: generic admin edit (amount/commission/title/description), e.g.
+// to correct a job-escrow amount after a dispute. requireAdmin checks the
+// Firebase custom claim set via scripts/setAdminClaim.js.
+router.patch("/agreements/:id/admin", requireAdmin, async (req, res) => {
+  try {
+    const { reason, ...changes } = req.body;
+    const updated = await escrowService.adminUpdateAgreement(
+      req.params.id,
+      req.user.uid,
+      changes,
+      reason
+    );
+    res.json(updated);
+  } catch (err) {
+    console.error("Admin update failed:", err);
+    res.status(400).json({ error: err.message });
   }
 });
 

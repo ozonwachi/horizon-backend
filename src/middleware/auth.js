@@ -13,7 +13,14 @@ async function requireAuth(req, res, next) {
 
   try {
     const decoded = await auth.verifyIdToken(token);
-    req.user = { uid: decoded.uid, email: decoded.email || null };
+    req.user = {
+      uid: decoded.uid,
+      email: decoded.email || null,
+      // Set via `firebase-admin`'s setCustomUserClaims - see
+      // scripts/setAdminClaim.js. Not present (undefined -> false) for
+      // ordinary users.
+      isAdmin: decoded.admin === true,
+    };
     next();
   } catch (err) {
     console.error("Token verification failed:", err.message);
@@ -21,4 +28,13 @@ async function requireAuth(req, res, next) {
   }
 }
 
-module.exports = { requireAuth };
+// Must run after requireAuth (needs req.user). Blocks any route it guards
+// for non-admins with a 403.
+function requireAdmin(req, res, next) {
+  if (!req.user || !req.user.isAdmin) {
+    return res.status(403).json({ error: "Admin access required" });
+  }
+  next();
+}
+
+module.exports = { requireAuth, requireAdmin };
