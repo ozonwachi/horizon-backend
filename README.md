@@ -174,6 +174,8 @@ final response = await http.post(
 | POST | `/escrow/agreements/:id/dispute` | user (either party) | Legacy: dispute a whole (single-tranche) agreement |
 | POST | `/escrow/agreements/:id/cancel` | user (either party) | Buyer cancels unilaterally if unfunded; otherwise requires both parties to call this |
 | PATCH | `/escrow/agreements/:id/admin` | **admin** | Edit amount/commission/title/description, with a required `reason`; audit-logged |
+| GET | `/escrow/agreements/admin/all` | **admin** | List every agreement in the system (not just the caller's own) - powers the Admin Dashboard screen; optional `?status=disputed` to filter |
+| POST | `/escrow/agreements/:id/tranches/:trancheId/admin-resolve` | **admin** | Resolve a disputed tranche - `{"outcome":"release"}` pays the seller, `{"outcome":"refund"}` pays the buyer back; audit-logged |
 | GET | `/escrow/agreements` | user | List every agreement the caller is buyer or seller on |
 | GET | `/escrow/agreements/:id` | user (buyer or seller) | Fetch one agreement |
 | POST | `/escrow/internal/flag-overdue-tranches` | `x-cron-secret` header | Cron hook - flags (does not release) overdue tranches |
@@ -183,12 +185,6 @@ final response = await http.post(
 | POST | `/wallet/withdrawals` | user | Request a withdrawal to a bank account |
 | GET | `/wallet/withdrawals` | user | List the caller's withdrawal requests |
 | POST | `/webhooks/paystack` | signature-verified | Paystack webhook receiver |
-
-Admin-only tranche dispute resolution (`adminResolveTranche` in
-`escrowService.js` - release or refund a single disputed tranche) exists as a
-service function but isn't wired to a route yet; add one behind
-`requireAdmin` the same way `/agreements/:id/admin` is, when the admin panel
-needs it.
 
 ## Firestore collections this expects
 
@@ -212,6 +208,5 @@ needs it.
 ## Still TODO (not built yet)
 
 - Seller payout collection UI (bank account + `createTransferRecipient` call) in Flutter
-- Route + admin UI for `adminResolveTranche` (service function exists, no route yet)
 - Backend for the in-app "Message Admin" / "Open a Dispute" screen - currently frontend-only (captures locally, no backend call) by design, pending an actual admin support inbox
 - Push notifications (current `notifications` collection only powers in-app bell/list, no FCM push yet)

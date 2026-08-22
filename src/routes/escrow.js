@@ -250,6 +250,51 @@ router.patch("/agreements/:id/admin", requireAdmin, async (req, res) => {
   }
 });
 
+// Admin dashboard: browse every agreement, not just ones the caller is a
+// party to. Optional ?status=disputed (etc.) to triage. Registered before
+// GET /agreements/:id below is not actually required (this has two path
+// segments after /agreements, :id only matches one, so there's no route
+// collision either way) but kept together with the other admin routes for
+// readability.
+router.get("/agreements/admin/all", requireAdmin, async (req, res) => {
+  try {
+    const { status, limit } = req.query;
+    const agreements = await escrowService.listAllAgreements({
+      status: status || undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+    res.json(agreements);
+  } catch (err) {
+    console.error("Admin list all agreements failed:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin resolves a disputed tranche: "release" credits the seller as
+// normal, "refund" credits the buyer instead. This is the actual mechanism
+// behind the job-escrow "skillsman gets a transport refund" scenario from
+// the original spec - adminUpdateAgreement (above) only edits metadata, it
+// doesn't move money or clear a dispute; this route does both.
+router.post(
+  "/agreements/:id/tranches/:trancheId/admin-resolve",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const { outcome } = req.body; // "release" | "refund"
+      const updated = await escrowService.adminResolveTranche(
+        req.params.id,
+        req.params.trancheId,
+        outcome,
+        req.user.uid
+      );
+      res.json(updated);
+    } catch (err) {
+      console.error("Admin resolve tranche failed:", err);
+      res.status(400).json({ error: err.message });
+    }
+  }
+);
+
 router.get("/agreements", async (req, res) => {
   try {
     const agreements = await escrowService.listForUser(req.user.uid);

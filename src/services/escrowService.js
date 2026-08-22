@@ -337,7 +337,7 @@ async function _releaseTrancheInTransaction(tx, docRef, data, trancheId) {
 
   const tranche = tranches[index];
   if (tranche.status === TrancheStatus.RELEASED) {
-    return { alreadyReleased: true, tranches };
+    return { alreadyReleased: true, tranches, status: data.status };
   }
   if (tranche.status === TrancheStatus.DISPUTED) {
     throw new Error("Cannot release a disputed tranche");
@@ -361,11 +361,12 @@ async function _releaseTrancheInTransaction(tx, docRef, data, trancheId) {
   );
 
   const allReleased = updatedTranches.every((t) => t.status === TrancheStatus.RELEASED);
+  const newStatus = allReleased ? EscrowStatus.RELEASED : EscrowStatus.PARTIALLY_RELEASED;
   const nextReleaseEligibleAt = computeNextReleaseEligibleAt(updatedTranches);
 
   tx.update(docRef, {
     tranches: updatedTranches,
-    status: allReleased ? EscrowStatus.RELEASED : EscrowStatus.PARTIALLY_RELEASED,
+    status: newStatus,
     nextReleaseEligibleAt: nextReleaseEligibleAt
       ? admin.firestore.Timestamp.fromMillis(nextReleaseEligibleAt)
       : null,
@@ -373,7 +374,7 @@ async function _releaseTrancheInTransaction(tx, docRef, data, trancheId) {
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  return { alreadyReleased: false, tranches: updatedTranches };
+  return { alreadyReleased: false, tranches: updatedTranches, status: newStatus };
 }
 
 // Buyer explicitly confirms a tranche (works for buyer_confirmation
@@ -397,7 +398,15 @@ async function confirmTrancheRelease(agreementId, trancheId, buyerUid) {
     }
 
     sellerId = data.sellerId;
-    return _releaseTrancheInTransaction(tx, docRef, data, trancheId);
+    const releaseResult = await _releaseTrancheInTransaction(tx, docRef, data, trancheId);
+    // Callers (the Flutter app) always parse this as a full EscrowAgreement,
+    // not a bare tranche/result fragment - return the merged agreement.
+    return {
+      ...data,
+      tranches: releaseResult.tranches,
+      status: releaseResult.status,
+      alreadyReleased: releaseResult.alreadyReleased,
+    };
   });
 
   if (sellerId && !result.alreadyReleased) {
@@ -462,7 +471,9 @@ async function markMilestoneReached(agreementId, trancheId, sellerUid) {
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    return updatedTranches[index];
+    // Callers always parse this as a full EscrowAgreement - return the
+    // merged agreement, not the bare updated tranche.
+    return { ...data, tranches: updatedTranches };
   });
 
   if (buyerId) {
@@ -518,7 +529,9 @@ async function disputeTranche(agreementId, trancheId, reason, actorUid) {
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    return updatedTranches[index];
+    // Callers always parse this as a full EscrowAgreement - return the
+    // merged agreement, not the bare updated tranche.
+    return { ...data, tranches: updatedTranches, status: EscrowStatus.DISPUTED };
   });
 
   if (otherPartyId) {
@@ -542,10 +555,11 @@ async function disputeTranche(agreementId, trancheId, reason, actorUid) {
 // authentication/authorization is the Admin Panel's job - this function
 // assumes the caller (a route protected by an admin check) has already
 // verified the actor is an admin.
-async function adminResolveTranche(agreementId, trancheId, outcome) {
+async function adminResolveTranche(agreementId, trancheId, outcome, adminUid) {
   const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
   let buyerId = null;
   let sellerId = null;
+  let previousTrancheStatus = null;
 
   const result = await db.runTransaction(async (tx) => {
     const snap = await tx.get(docRef);
@@ -558,13 +572,22 @@ async function adminResolveTranche(agreementId, trancheId, outcome) {
     const index = tranches.findIndex((t) => t.id === trancheId);
     if (index === -1) throw new Error("Tranche not found");
     const tranche = tranches[index];
+    previousTrancheStatus = tranche.status;
 
     if (tranche.status !== TrancheStatus.DISPUTED) {
       throw new Error("Tranche is not under dispute");
     }
 
     if (outcome === "release") {
-      return _releaseTrancheInTransaction(tx, docRef, data, trancheId);
+      const releaseResult = await _releaseTrancheInTransaction(tx, docRef, data, trancheId);
+      // Callers always parse this as a full EscrowAgreement - return the
+      // merged agreement, not the bare tranche/result fragment.
+      return {
+        ...data,
+        tranches: releaseResult.tranches,
+        status: releaseResult.status,
+        alreadyReleased: releaseResult.alreadyReleased,
+      };
     }
 
     if (outcome === "refund") {
@@ -589,18 +612,21 @@ async function adminResolveTranche(agreementId, trancheId, outcome) {
       const allSettled = updatedTranches.every(
         (t) => t.status === TrancheStatus.RELEASED || t.status === TrancheStatus.REFUNDED
       );
+      const newStatus = stillDisputed
+        ? EscrowStatus.DISPUTED
+        : allSettled
+        ? EscrowStatus.RELEASED
+        : EscrowStatus.PARTIALLY_RELEASED;
 
       tx.update(docRef, {
         tranches: updatedTranches,
-        status: stillDisputed
-          ? EscrowStatus.DISPUTED
-          : allSettled
-          ? EscrowStatus.RELEASED
-          : EscrowStatus.PARTIALLY_RELEASED,
+        status: newStatus,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      return updatedTranches[index];
+      // Callers always parse this as a full EscrowAgreement - return the
+      // merged agreement, not the bare updated tranche.
+      return { ...data, tranches: updatedTranches, status: newStatus };
     }
 
     throw new Error(`Unknown outcome "${outcome}"`);
@@ -623,7 +649,40 @@ async function adminResolveTranche(agreementId, trancheId, outcome) {
     )
   );
 
+  if (adminUid) {
+    await recordAuditLog({
+      userId: adminUid,
+      action: "escrow_dispute_resolved",
+      targetType: "escrowTranche",
+      targetId: `${agreementId}/${trancheId}`,
+      previousValue: { status: previousTrancheStatus },
+      newValue: { status: outcome === "refund" ? TrancheStatus.REFUNDED : TrancheStatus.RELEASED },
+      reason: outcome,
+    }).catch((err) => console.error("recordAuditLog (dispute resolved) failed:", err));
+  }
+
   return result;
+}
+
+// Item: admin dashboard "browse everything" list - unlike listForUser, this
+// is NOT scoped to a buyer/seller and is meant to be called only from a
+// route already protected by requireAdmin. Optional [status] filters to one
+// EscrowStatus value (e.g. "disputed" to triage what needs attention first).
+//
+// NOTE: filtering by status AND ordering by updatedAt needs a Firestore
+// composite index (collection: escrowAgreements, fields: status ASC,
+// updatedAt DESC) - Firestore will return a direct link to create it the
+// first time this runs with a status filter, the same as other composite
+// queries in this file.
+async function listAllAgreements({ status, limit = 100 } = {}) {
+  let query = db.collection(ESCROW_COLLECTION).orderBy("updatedAt", "desc");
+  if (status) {
+    query = query.where("status", "==", status);
+  }
+  query = query.limit(Math.min(limit, 500));
+
+  const snap = await query.get();
+  return snap.docs.map((doc) => doc.data());
 }
 
 // Cron entrypoint - see routes/escrow.js for the internal, secret-protected
@@ -1042,4 +1101,5 @@ module.exports = {
   flagOverdueTranches,
   requestOrConfirmCancel,
   adminUpdateAgreement,
+  listAllAgreements,
 };
