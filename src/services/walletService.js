@@ -1,5 +1,11 @@
 const { db, admin } = require("../config/firebaseAdmin");
 const paystackService = require("./paystackService");
+const {
+  ADMIN_WALLET_UID,
+  TYPES: LEDGER_TYPES,
+  recordWalletTransaction,
+  listWalletTransactions,
+} = require("./walletLedgerService");
 
 const WALLETS_COLLECTION = "wallets";
 const WITHDRAWALS_COLLECTION = "withdrawalRequests";
@@ -16,15 +22,19 @@ async function getBalance(uid) {
   return snap.data().balanceKobo || 0;
 }
 
-async function creditWallet(uid, amountKobo) {
+async function creditWallet(uid, amountKobo, { type = LEDGER_TYPES.DEPOSIT, reason } = {}) {
   const walletRef = db.collection(WALLETS_COLLECTION).doc(uid);
-  await walletRef.set(
-    {
-      balanceKobo: admin.firestore.FieldValue.increment(amountKobo),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    },
-    { merge: true }
-  );
+  await db.runTransaction(async (tx) => {
+    tx.set(
+      walletRef,
+      {
+        balanceKobo: admin.firestore.FieldValue.increment(amountKobo),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+    recordWalletTransaction(tx, { uid, amountKobo, type, reason });
+  });
   return getBalance(uid);
 }
 
@@ -93,6 +103,12 @@ async function requestWithdrawal({
       },
       { merge: true }
     );
+    recordWalletTransaction(tx, {
+      uid,
+      amountKobo: -amountKobo,
+      type: LEDGER_TYPES.WITHDRAWAL,
+      reason: `Withdrawal to ${bankName} (${accountNumber})`,
+    });
 
     const request = {
       id: requestRef.id,
@@ -151,6 +167,12 @@ async function rejectWithdrawal(requestId, reason) {
       },
       { merge: true }
     );
+    recordWalletTransaction(tx, {
+      uid: data.uid,
+      amountKobo: data.amountKobo,
+      type: LEDGER_TYPES.WITHDRAWAL_REJECTED,
+      reason: reason || "Withdrawal request rejected",
+    });
 
     tx.update(ref, {
       status: WithdrawalStatus.REJECTED,
@@ -164,6 +186,7 @@ async function rejectWithdrawal(requestId, reason) {
 
 module.exports = {
   WithdrawalStatus,
+  ADMIN_WALLET_UID,
   getBalance,
   creditWallet,
   initiateDeposit,
@@ -173,4 +196,10 @@ module.exports = {
   listWithdrawalsForUser,
   markWithdrawalPaid,
   rejectWithdrawal,
+  // Own wallet history, and (admin-only, gated in the route) the admin
+  // wallet's balance/history - same underlying ledger collection, just a
+  // different uid.
+  listTransactions: listWalletTransactions,
+  getAdminWalletBalance: () => getBalance(ADMIN_WALLET_UID),
+  listAdminWalletTransactions: (limit) => listWalletTransactions(ADMIN_WALLET_UID, limit),
 };

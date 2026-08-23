@@ -1,6 +1,11 @@
 const { db, admin } = require("../config/firebaseAdmin");
 const { notifyUser } = require("./notificationService");
 const { recordAuditLog } = require("./auditLogService");
+const {
+  ADMIN_WALLET_UID,
+  TYPES: LEDGER_TYPES,
+  recordWalletTransaction,
+} = require("./walletLedgerService");
 
 const ESCROW_COLLECTION = "escrowAgreements";
 const COMMISSION_COLLECTION = "commissionRules";
@@ -26,6 +31,12 @@ const TrancheStatus = {
   RELEASED: "released",
   DISPUTED: "disputed",
   REFUNDED: "refunded",
+  // A tranche an admin force-cancelled with a split decision - part to the
+  // buyer, part to the seller, part to the admin wallet, in any
+  // combination - so neither RELEASED (100% to seller) nor REFUNDED (100%
+  // to buyer) describes it accurately. The tranche's `splits` array (see
+  // adminForceCancelDeal) is the actual record of where the money went.
+  SETTLED: "settled",
 };
 
 const ReleaseConditionType = {
@@ -313,6 +324,13 @@ async function markReleased(agreementId) {
       },
       { merge: true }
     );
+    recordWalletTransaction(tx, {
+      uid: data.sellerId,
+      amountKobo: data.amountKobo,
+      type: LEDGER_TYPES.ESCROW_RELEASE,
+      agreementId,
+      recipientRole: "seller",
+    });
 
     return { ...data, status: EscrowStatus.RELEASED };
   });
@@ -342,7 +360,10 @@ function computeAgreementStatus(tranches) {
     return EscrowStatus.DISPUTED;
   }
   const allSettled = tranches.every(
-    (t) => t.status === TrancheStatus.RELEASED || t.status === TrancheStatus.REFUNDED
+    (t) =>
+      t.status === TrancheStatus.RELEASED ||
+      t.status === TrancheStatus.REFUNDED ||
+      t.status === TrancheStatus.SETTLED
   );
   if (!allSettled) {
     return EscrowStatus.PARTIALLY_RELEASED;
@@ -402,6 +423,15 @@ async function _releaseTrancheInTransaction(tx, docRef, data, trancheId, adminRe
   };
 
   const walletRef = db.collection("wallets").doc(data.sellerId);
+  recordWalletTransaction(tx, {
+    uid: data.sellerId,
+    amountKobo: tranche.amountKobo,
+    type: LEDGER_TYPES.ESCROW_RELEASE,
+    agreementId: docRef.id,
+    trancheId,
+    reason: adminResolution ? adminResolution.reason : null,
+    recipientRole: "seller",
+  });
   tx.set(
     walletRef,
     {
@@ -678,6 +708,15 @@ async function adminResolveTranche(agreementId, trancheId, outcome, adminUid, re
         },
         { merge: true }
       );
+      recordWalletTransaction(tx, {
+        uid: data.buyerId,
+        amountKobo: tranche.amountKobo,
+        type: LEDGER_TYPES.ESCROW_REFUND,
+        agreementId,
+        trancheId,
+        reason: adminResolution ? adminResolution.reason : null,
+        recipientRole: "buyer",
+      });
 
       const newStatus = computeAgreementStatus(updatedTranches);
 
@@ -894,6 +933,13 @@ async function payFromWallet(agreementId, buyerUid) {
       },
       { merge: true }
     );
+    recordWalletTransaction(tx, {
+      uid: buyerUid,
+      amountKobo: -totalKobo,
+      type: LEDGER_TYPES.ESCROW_PAYMENT,
+      agreementId,
+      recipientRole: "buyer",
+    });
 
     const nowMillis = Date.now();
     const update = {
@@ -1050,6 +1096,14 @@ async function requestOrConfirmCancel(agreementId, actorUid) {
         },
         { merge: true }
       );
+      recordWalletTransaction(tx, {
+        uid: data.buyerId,
+        amountKobo: refundKobo,
+        type: LEDGER_TYPES.ESCROW_REFUND,
+        agreementId,
+        reason: "Mutual cancellation",
+        recipientRole: "buyer",
+      });
     }
 
     tx.update(docRef, {
@@ -1241,21 +1295,67 @@ const FORCE_CANCELLABLE_STATUSES = [
   EscrowStatus.DISPUTED,
 ];
 
+// Turns one tranche's decision into a validated splits array of
+// { recipient: "buyer" | "seller" | "admin_wallet", amountKobo }. Accepts
+// the plain "release"/"refund" string (the common case - all of it to one
+// side) alongside an actual array (the admin chose to split it), so the
+// simple case stays a one-line decision while a genuinely mixed outcome
+// (e.g. refund a job-skillsman's transport cost, release the rest) is
+// still expressible. Every kobo of the tranche must be accounted for -
+// deliberately no silent remainder and no default "leftover goes to
+// admin_wallet": the admin has to say where every part of it goes.
+function normalizeForceCancelDecision(tranche, decision) {
+  let splits;
+  if (decision === "release") {
+    splits = [{ recipient: "seller", amountKobo: tranche.amountKobo }];
+  } else if (decision === "refund") {
+    splits = [{ recipient: "buyer", amountKobo: tranche.amountKobo }];
+  } else if (Array.isArray(decision) && decision.length > 0) {
+    splits = decision;
+  } else {
+    throw new Error(`Invalid decision for tranche "${tranche.label || tranche.id}"`);
+  }
+
+  const validRecipients = ["buyer", "seller", "admin_wallet"];
+  let sum = 0;
+  for (const split of splits) {
+    if (!validRecipients.includes(split && split.recipient)) {
+      throw new Error(
+        `Invalid split recipient for tranche "${tranche.label || tranche.id}" - must be buyer, seller, or admin_wallet`
+      );
+    }
+    if (!Number.isInteger(split.amountKobo) || split.amountKobo <= 0) {
+      throw new Error(
+        `Split amounts must be positive whole numbers (tranche "${tranche.label || tranche.id}")`
+      );
+    }
+    sum += split.amountKobo;
+  }
+  if (sum !== tranche.amountKobo) {
+    throw new Error(
+      `Split amounts for tranche "${tranche.label || tranche.id}" total ${sum} kobo but the ` +
+        `tranche is ${tranche.amountKobo} kobo - every kobo has to be accounted for, with ` +
+        "nothing created or lost"
+    );
+  }
+
+  return splits;
+}
+
 // Admin-only: ends a deal immediately, without needing both parties to
 // mutually confirm and without requiring a formal dispute first - for
 // situations like an inexperienced user who messages admin directly
 // instead of using the in-app Dispute button, or a deal that's stuck with
 // no cooperation between the parties.
 //
-// `decisions` is { [trancheId]: "release" | "refund" } and MUST cover every
-// tranche still PENDING or DISPUTED on the agreement - the admin decides
-// each one individually (pay the seller, or refund the buyer), exactly the
-// same choice as adminResolveTranche, just not limited to disputed
-// tranches and applied to the whole deal in one transaction. Tranches
+// `decisions` is { [trancheId]: "release" | "refund" | Split[] } and MUST
+// cover every tranche still PENDING or DISPUTED on the agreement - see
+// normalizeForceCancelDecision for what a Split[] looks like. Tranches
 // already RELEASED or REFUNDED are left untouched - force-cancelling
 // doesn't claw back money that already changed hands. No cap on the amount
 // this can move; the Flutter app is expected to show a clear confirmation
-// (with the exact total) before calling this, since it's irreversible.
+// (with the exact total per recipient) before calling this, since it's
+// irreversible.
 async function adminForceCancelDeal(agreementId, adminUid, decisions, reason) {
   if (!reason || !reason.trim()) {
     throw new Error("A reason is required to force-cancel a deal");
@@ -1294,69 +1394,81 @@ async function adminForceCancelDeal(agreementId, adminUid, decisions, reason) {
 
     const updatedTranches = [...tranches];
     for (const tranche of openTranches) {
-      const outcome = decisions[tranche.id];
+      const splits = normalizeForceCancelDecision(tranche, decisions[tranche.id]);
       const index = updatedTranches.findIndex((t) => t.id === tranche.id);
-      // Stamped on the tranche itself (not just the audit log) so the
-      // tranche card can show who this was resolved by and why, the same
-      // as adminResolveTranche.
-      const adminResolution = {
-        by: adminUid,
-        outcome,
-        reason,
-        resolvedAt: admin.firestore.Timestamp.now(),
-      };
+      const resolvedAt = admin.firestore.Timestamp.now();
 
-      if (outcome === "release") {
-        updatedTranches[index] = {
-          ...tranche,
-          status: TrancheStatus.RELEASED,
-          releasedAt: admin.firestore.Timestamp.now(),
-          adminResolution,
-        };
-        const walletRef = db.collection("wallets").doc(sellerId);
+      const singleRecipient = splits.length === 1 ? splits[0].recipient : null;
+      // Kept as "release"/"refund" for the common single-recipient case so
+      // every existing reader of adminResolution.outcome (the tranche
+      // card, the audit log) keeps working unchanged; "admin_wallet" and
+      // "split" are new values only a genuinely split/redirected tranche
+      // produces.
+      const outcome =
+        singleRecipient === "seller"
+          ? "release"
+          : singleRecipient === "buyer"
+            ? "refund"
+            : singleRecipient === "admin_wallet"
+              ? "admin_wallet"
+              : "split";
+
+      for (const split of splits) {
+        const recipientUid =
+          split.recipient === "seller"
+            ? sellerId
+            : split.recipient === "buyer"
+              ? buyerId
+              : ADMIN_WALLET_UID;
+
+        const walletRef = db.collection("wallets").doc(recipientUid);
         tx.set(
           walletRef,
           {
-            balanceKobo: admin.firestore.FieldValue.increment(tranche.amountKobo),
+            balanceKobo: admin.firestore.FieldValue.increment(split.amountKobo),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           },
           { merge: true }
         );
+        recordWalletTransaction(tx, {
+          uid: recipientUid,
+          amountKobo: split.amountKobo,
+          type: LEDGER_TYPES.ADMIN_FORCE_CANCEL,
+          agreementId,
+          trancheId: tranche.id,
+          reason,
+          recipientRole: split.recipient,
+        });
+
         actionsSummary.push({
           trancheId: tranche.id,
           trancheLabel: tranche.label,
-          outcome: "release",
-          amountKobo: tranche.amountKobo,
-          recipientUid: sellerId,
-          recipientRole: "seller",
+          outcome: split.recipient === "seller" ? "release" : split.recipient === "buyer" ? "refund" : "admin_wallet",
+          amountKobo: split.amountKobo,
+          recipientUid,
+          recipientRole: split.recipient,
         });
-      } else if (outcome === "refund") {
-        updatedTranches[index] = {
-          ...tranche,
-          status: TrancheStatus.REFUNDED,
-          releasedAt: admin.firestore.Timestamp.now(),
-          adminResolution,
-        };
-        const walletRef = db.collection("wallets").doc(buyerId);
-        tx.set(
-          walletRef,
-          {
-            balanceKobo: admin.firestore.FieldValue.increment(tranche.amountKobo),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          },
-          { merge: true }
-        );
-        actionsSummary.push({
-          trancheId: tranche.id,
-          trancheLabel: tranche.label,
-          outcome: "refund",
-          amountKobo: tranche.amountKobo,
-          recipientUid: buyerId,
-          recipientRole: "buyer",
-        });
-      } else {
-        throw new Error(`Invalid outcome "${outcome}" for tranche ${tranche.id}`);
       }
+
+      // Single recipient to buyer/seller keeps the familiar
+      // RELEASED/REFUNDED status everything already reads (tranche
+      // progress counters, filters, etc.); anything else - multiple
+      // recipients, or the whole tranche redirected to the admin wallet -
+      // is SETTLED, since neither existing label describes it honestly.
+      const newTrancheStatus =
+        singleRecipient === "seller"
+          ? TrancheStatus.RELEASED
+          : singleRecipient === "buyer"
+            ? TrancheStatus.REFUNDED
+            : TrancheStatus.SETTLED;
+
+      updatedTranches[index] = {
+        ...tranche,
+        status: newTrancheStatus,
+        releasedAt: resolvedAt,
+        splits,
+        adminResolution: { by: adminUid, outcome, reason, resolvedAt },
+      };
     }
 
     tx.update(docRef, {

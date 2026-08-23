@@ -1,5 +1,5 @@
 const express = require("express");
-const { requireAuth } = require("../middleware/auth");
+const { requireAuth, requireAdmin } = require("../middleware/auth");
 const walletService = require("../services/walletService");
 const { auth: firebaseAuth } = require("../config/firebaseAdmin");
 
@@ -73,6 +73,44 @@ router.get("/withdrawals", async (req, res) => {
     res.json(requests);
   } catch (err) {
     console.error("List withdrawals failed:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Item: the wallet screen used to only ever show a single number that
+// changed - no record of why. This is that record: every release,
+// refund, payment, deposit, and withdrawal touching this user's wallet,
+// newest first.
+router.get("/transactions", async (req, res) => {
+  try {
+    const transactions = await walletService.listTransactions(req.user.uid);
+    res.json(transactions);
+  } catch (err) {
+    console.error("List wallet transactions failed:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin-only: the dedicated wallet that holds money from a force-cancel
+// split an admin explicitly routed away from both buyer and seller (see
+// adminForceCancelDeal) - never funded any other way, so its balance and
+// history are entirely money an admin will need to manually resolve later.
+router.get("/admin-wallet/balance", requireAdmin, async (req, res) => {
+  try {
+    const balanceKobo = await walletService.getAdminWalletBalance();
+    res.json({ balanceKobo });
+  } catch (err) {
+    console.error("Get admin wallet balance failed:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get("/admin-wallet/transactions", requireAdmin, async (req, res) => {
+  try {
+    const transactions = await walletService.listAdminWalletTransactions();
+    res.json(transactions);
+  } catch (err) {
+    console.error("List admin wallet transactions failed:", err);
     res.status(500).json({ error: err.message });
   }
 });
