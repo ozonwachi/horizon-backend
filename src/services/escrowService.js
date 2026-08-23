@@ -655,6 +655,7 @@ async function adminResolveTranche(agreementId, trancheId, outcome, adminUid) {
       action: "escrow_dispute_resolved",
       targetType: "escrowTranche",
       targetId: `${agreementId}/${trancheId}`,
+      agreementId,
       previousValue: { status: previousTrancheStatus },
       newValue: { status: outcome === "refund" ? TrancheStatus.REFUNDED : TrancheStatus.RELEASED },
       reason: outcome,
@@ -1060,6 +1061,7 @@ async function adminUpdateAgreement(agreementId, adminUid, changes, reason) {
     action: "escrow_admin_update",
     targetType: "escrowAgreement",
     targetId: agreementId,
+    agreementId,
     previousValue,
     newValue,
     reason,
@@ -1082,6 +1084,217 @@ async function adminUpdateAgreement(agreementId, adminUid, changes, reason) {
   return (await docRef.get()).data();
 }
 
+// Fields adminUpdateTranche is allowed to touch. Deliberately excludes
+// releaseCondition (timing) and status - status changes go through the
+// dedicated release/refund transactions below so wallet balances always
+// stay consistent with the tranche's recorded status.
+const TRANCHE_ADMIN_EDITABLE_FIELDS = ["amountKobo", "label"];
+
+// Admin-only: edits a single tranche's amount/label. Only allowed while the
+// tranche is still PENDING - once it's released or refunded, real money has
+// already moved, and once it's disputed, the intended path is to resolve it
+// (adminResolveTranche) or fold it into an adminForceCancelDeal decision,
+// not silently rewrite its numbers.
+async function adminUpdateTranche(agreementId, trancheId, adminUid, changes, reason) {
+  if (!reason || !reason.trim()) {
+    throw new Error("A reason is required for an admin tranche edit");
+  }
+
+  const filteredChanges = {};
+  for (const field of TRANCHE_ADMIN_EDITABLE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(changes || {}, field)) {
+      filteredChanges[field] = changes[field];
+    }
+  }
+  if (Object.keys(filteredChanges).length === 0) {
+    throw new Error("No editable fields provided");
+  }
+
+  const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
+  let previousValue = null;
+
+  const result = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(docRef);
+    if (!snap.exists) throw new Error("Agreement not found");
+    const data = snap.data();
+    const tranches = data.tranches || [];
+    const index = tranches.findIndex((t) => t.id === trancheId);
+    if (index === -1) throw new Error("Tranche not found");
+    const tranche = tranches[index];
+
+    if (tranche.status !== TrancheStatus.PENDING) {
+      throw new Error(
+        `Cannot edit a tranche with status "${tranche.status}" - only pending tranches can be edited`
+      );
+    }
+
+    previousValue = { amountKobo: tranche.amountKobo, label: tranche.label };
+
+    const updatedTranches = [...tranches];
+    updatedTranches[index] = { ...tranche, ...filteredChanges };
+
+    tx.update(docRef, {
+      tranches: updatedTranches,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return { ...data, tranches: updatedTranches };
+  });
+
+  await recordAuditLog({
+    userId: adminUid,
+    action: "escrow_tranche_edited",
+    targetType: "escrowTranche",
+    targetId: `${agreementId}/${trancheId}`,
+    agreementId,
+    previousValue,
+    newValue: filteredChanges,
+    reason,
+  }).catch((err) => console.error("recordAuditLog (tranche edited) failed:", err));
+
+  return result;
+}
+
+// Statuses a deal must be in for adminForceCancelDeal to make sense - money
+// actually exists to move (funded), and the deal hasn't already fully
+// settled one way or another.
+const FORCE_CANCELLABLE_STATUSES = [
+  EscrowStatus.FUNDED,
+  EscrowStatus.PARTIALLY_RELEASED,
+  EscrowStatus.DISPUTED,
+];
+
+// Admin-only: ends a deal immediately, without needing both parties to
+// mutually confirm and without requiring a formal dispute first - for
+// situations like an inexperienced user who messages admin directly
+// instead of using the in-app Dispute button, or a deal that's stuck with
+// no cooperation between the parties.
+//
+// `decisions` is { [trancheId]: "release" | "refund" } and MUST cover every
+// tranche still PENDING or DISPUTED on the agreement - the admin decides
+// each one individually (pay the seller, or refund the buyer), exactly the
+// same choice as adminResolveTranche, just not limited to disputed
+// tranches and applied to the whole deal in one transaction. Tranches
+// already RELEASED or REFUNDED are left untouched - force-cancelling
+// doesn't claw back money that already changed hands. No cap on the amount
+// this can move; the Flutter app is expected to show a clear confirmation
+// (with the exact total) before calling this, since it's irreversible.
+async function adminForceCancelDeal(agreementId, adminUid, decisions, reason) {
+  if (!reason || !reason.trim()) {
+    throw new Error("A reason is required to force-cancel a deal");
+  }
+
+  const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
+  let buyerId = null;
+  let sellerId = null;
+  let previousStatus = null;
+  const actionsSummary = [];
+
+  const result = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(docRef);
+    if (!snap.exists) throw new Error("Agreement not found");
+    const data = snap.data();
+    buyerId = data.buyerId;
+    sellerId = data.sellerId;
+    previousStatus = data.status;
+
+    if (!FORCE_CANCELLABLE_STATUSES.includes(data.status)) {
+      throw new Error(
+        `Cannot force-cancel from status "${data.status}" - either nothing has been funded yet, or the deal has already fully settled`
+      );
+    }
+
+    const tranches = data.tranches || [];
+    const openTranches = tranches.filter(
+      (t) => t.status === TrancheStatus.PENDING || t.status === TrancheStatus.DISPUTED
+    );
+    const missing = openTranches.filter((t) => !(decisions || {})[t.id]);
+    if (missing.length > 0) {
+      throw new Error(
+        `Missing a decision for tranche(s): ${missing.map((t) => t.label || t.id).join(", ")}`
+      );
+    }
+
+    const updatedTranches = [...tranches];
+    for (const tranche of openTranches) {
+      const outcome = decisions[tranche.id];
+      const index = updatedTranches.findIndex((t) => t.id === tranche.id);
+
+      if (outcome === "release") {
+        updatedTranches[index] = {
+          ...tranche,
+          status: TrancheStatus.RELEASED,
+          releasedAt: admin.firestore.Timestamp.now(),
+        };
+        const walletRef = db.collection("wallets").doc(sellerId);
+        tx.set(
+          walletRef,
+          {
+            balanceKobo: admin.firestore.FieldValue.increment(tranche.amountKobo),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+        actionsSummary.push({ trancheId: tranche.id, outcome: "release", amountKobo: tranche.amountKobo });
+      } else if (outcome === "refund") {
+        updatedTranches[index] = {
+          ...tranche,
+          status: TrancheStatus.REFUNDED,
+          releasedAt: admin.firestore.Timestamp.now(),
+        };
+        const walletRef = db.collection("wallets").doc(buyerId);
+        tx.set(
+          walletRef,
+          {
+            balanceKobo: admin.firestore.FieldValue.increment(tranche.amountKobo),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+        actionsSummary.push({ trancheId: tranche.id, outcome: "refund", amountKobo: tranche.amountKobo });
+      } else {
+        throw new Error(`Invalid outcome "${outcome}" for tranche ${tranche.id}`);
+      }
+    }
+
+    tx.update(docRef, {
+      tranches: updatedTranches,
+      status: EscrowStatus.CANCELLED,
+      cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return { ...data, tranches: updatedTranches, status: EscrowStatus.CANCELLED };
+  });
+
+  await Promise.all(
+    [buyerId, sellerId]
+      .filter(Boolean)
+      .map((uid) =>
+        notifyUser(uid, {
+          type: "escrow_force_cancelled",
+          title: "Escrow deal closed by admin",
+          body: `An admin ended this deal: ${reason}`,
+          relatedType: "escrow",
+          relatedId: agreementId,
+        }).catch((err) => console.error("notifyUser (force cancelled) failed:", err))
+      )
+  );
+
+  await recordAuditLog({
+    userId: adminUid,
+    action: "escrow_force_cancelled",
+    targetType: "escrowAgreement",
+    targetId: agreementId,
+    agreementId,
+    previousValue: { status: previousStatus },
+    newValue: { status: EscrowStatus.CANCELLED, decisions: actionsSummary },
+    reason,
+  }).catch((err) => console.error("recordAuditLog (force cancelled) failed:", err));
+
+  return result;
+}
+
 module.exports = {
   EscrowStatus,
   TrancheStatus,
@@ -1101,5 +1314,7 @@ module.exports = {
   flagOverdueTranches,
   requestOrConfirmCancel,
   adminUpdateAgreement,
+  adminUpdateTranche,
+  adminForceCancelDeal,
   listAllAgreements,
 };

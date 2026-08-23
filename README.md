@@ -176,8 +176,12 @@ final response = await http.post(
 | PATCH | `/escrow/agreements/:id/admin` | **admin** | Edit amount/commission/title/description, with a required `reason`; audit-logged |
 | GET | `/escrow/agreements/admin/all` | **admin** | List every agreement in the system (not just the caller's own) - powers the Admin Dashboard screen; optional `?status=disputed` to filter |
 | POST | `/escrow/agreements/:id/tranches/:trancheId/admin-resolve` | **admin** | Resolve a disputed tranche - `{"outcome":"release"}` pays the seller, `{"outcome":"refund"}` pays the buyer back; audit-logged |
+| POST | `/escrow/agreements/:id/tranches/:trancheId/admin-edit` | **admin** | Edit a tranche's `amountKobo`/`label`, with a required `reason` - only while it's still `pending`; audit-logged |
+| POST | `/escrow/agreements/:id/admin-force-cancel` | **admin** | Ends a deal immediately - `{"decisions":{"<trancheId>":"release"\|"refund"},"reason":"..."}` must decide every still-open tranche; no formal dispute required first, no cap on amount; audit-logged |
+| GET | `/escrow/agreements/admin/audit-log` | **admin** | List admin actions, most recent first; optional `?agreementId=...` to scope to one deal |
+| GET | `/escrow/agreements/:id/admin-conversation` | **admin** | Read-only: the buyer/seller chat thread for this deal (evidence for what they agreed on) - reads via the Admin SDK since Firestore's client rules only let the two participants read it directly |
 | GET | `/escrow/agreements` | user | List every agreement the caller is buyer or seller on |
-| GET | `/escrow/agreements/:id` | user (buyer or seller) | Fetch one agreement |
+| GET | `/escrow/agreements/:id` | user (buyer/seller) or admin | Fetch one agreement |
 | POST | `/escrow/internal/flag-overdue-tranches` | `x-cron-secret` header | Cron hook - flags (does not release) overdue tranches |
 | GET | `/wallet/balance` | user | Current wallet balance |
 | POST | `/wallet/deposits` | user | Start a Paystack deposit into the wallet |
@@ -192,7 +196,8 @@ final response = await http.post(
 - `wallets` - one doc per uid, `{ balanceKobo }`
 - `withdrawalRequests` - created by `walletService.requestWithdrawal`
 - `notifications` - written by `notificationService.notifyUser`/`notifyUsers`; the Flutter app reads/marks-read its own docs directly (rule allows `get`/`list`/limited `update` where `userId == request.auth.uid`)
-- `auditLogs` - written by `auditLogService.recordAuditLog` on every admin override; Admin-SDK-only, no client-facing rule
+- `auditLogs` - written by `auditLogService.recordAuditLog` on every admin override, now including a plain `agreementId` field (alongside `targetType`/`targetId`) so `listAuditLogs` can filter to one deal with a simple equality query; Admin-SDK-only, no client-facing rule
+- `conversations` (+ `messages` subcollection) - owned by the Flutter app's `MessageService`, not this backend; `conversationService.getEscrowConversation` reads a deal's thread via the Admin SDK purely so an admin (not a participant) can view it as evidence - never writes to it
 - `commissionRules` - seed manually in the Firestore console for now:
   ```json
   {

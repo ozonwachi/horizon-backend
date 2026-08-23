@@ -3,6 +3,8 @@ const { requireAuth, requireAdmin } = require("../middleware/auth");
 const escrowService = require("../services/escrowService");
 const paystackService = require("../services/paystackService");
 const { auth: firebaseAuth } = require("../config/firebaseAdmin");
+const auditLogService = require("../services/auditLogService");
+const conversationService = require("../services/conversationService");
 
 const router = express.Router();
 
@@ -294,6 +296,87 @@ router.post(
     }
   }
 );
+
+// Admin edits a single tranche's amount/label - only while it's still
+// PENDING (see adminUpdateTranche's comment for why released/refunded/
+// disputed tranches are excluded).
+router.post(
+  "/agreements/:id/tranches/:trancheId/admin-edit",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const { changes, reason } = req.body;
+      const updated = await escrowService.adminUpdateTranche(
+        req.params.id,
+        req.params.trancheId,
+        req.user.uid,
+        changes || {},
+        reason
+      );
+      res.json(updated);
+    } catch (err) {
+      console.error("Admin edit tranche failed:", err);
+      res.status(400).json({ error: err.message });
+    }
+  }
+);
+
+// Admin force-cancels a deal: decides release-or-refund for every tranche
+// still open (pending or disputed), then marks the deal cancelled. See
+// adminForceCancelDeal's comment for the exact rules.
+router.post("/agreements/:id/admin-force-cancel", requireAdmin, async (req, res) => {
+  try {
+    const { decisions, reason } = req.body;
+    const updated = await escrowService.adminForceCancelDeal(
+      req.params.id,
+      req.user.uid,
+      decisions || {},
+      reason
+    );
+    res.json(updated);
+  } catch (err) {
+    console.error("Admin force-cancel failed:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Lists admin audit log entries, most recent first. Pass ?agreementId=...
+// to scope to one deal (the "evidence" panel on that deal); omit it to
+// list every admin action platform-wide (the global Audit Log screen).
+router.get("/agreements/admin/audit-log", requireAdmin, async (req, res) => {
+  try {
+    const { agreementId, limit } = req.query;
+    const entries = await auditLogService.listAuditLogs({
+      agreementId: agreementId || undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+    res.json(entries);
+  } catch (err) {
+    console.error("Admin list audit log failed:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin-only read of the buyer/seller chat thread tied to this deal, so an
+// admin can see what the two parties actually agreed on before acting.
+// Goes through the Admin SDK because Firestore's client rules only let the
+// two participants read a conversation directly (see firestore.rules) -
+// an admin viewing someone else's deal isn't a participant.
+router.get("/agreements/:id/admin-conversation", requireAdmin, async (req, res) => {
+  try {
+    const agreement = await escrowService.getAgreement(req.params.id);
+    if (!agreement) return res.status(404).json({ error: "Agreement not found" });
+    const convo = await conversationService.getEscrowConversation(
+      agreement.buyerId,
+      agreement.sellerId,
+      agreement.id
+    );
+    res.json(convo);
+  } catch (err) {
+    console.error("Admin conversation fetch failed:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 router.get("/agreements", async (req, res) => {
   try {
