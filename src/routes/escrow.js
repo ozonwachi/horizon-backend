@@ -309,7 +309,10 @@ router.get("/agreements/:id", async (req, res) => {
   try {
     const agreement = await escrowService.getAgreement(req.params.id);
     if (!agreement) return res.status(404).json({ error: "Agreement not found" });
-    if (![agreement.buyerId, agreement.sellerId].includes(req.user.uid)) {
+    const isParty = [agreement.buyerId, agreement.sellerId].includes(req.user.uid);
+    // Admins can view any agreement (needed for the Admin Dashboard drill-in),
+    // not just the ones they're a buyer/seller on.
+    if (!isParty && !req.user.isAdmin) {
       return res.status(403).json({ error: "Not a party to this agreement" });
     }
     res.json(agreement);
