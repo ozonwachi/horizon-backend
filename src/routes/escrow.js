@@ -379,6 +379,40 @@ router.get("/agreements/:id/admin-conversation", requireAdmin, async (req, res) 
   }
 });
 
+// Buyer/seller send their support-conversation messages straight to
+// Firestore from the Flutter app (see MessageService.sendMessage) - there's
+// no backend involvement in the send itself. This is a notify-only
+// follow-up call right after that write, so an admin actually finds out a
+// message came in instead of only seeing it if they happen to open the
+// deal. Either party on the deal may call it; conversationService looks up
+// every admin uid and fans a notification out to all of them.
+router.post("/agreements/:id/support-messages/notify", async (req, res) => {
+  try {
+    const agreement = await escrowService.getAgreement(req.params.id);
+    if (!agreement) return res.status(404).json({ error: "Agreement not found" });
+
+    const isParty = [agreement.buyerId, agreement.sellerId].includes(req.user.uid);
+    if (!isParty) {
+      return res.status(403).json({ error: "Not a party to this agreement" });
+    }
+
+    const senderRole = req.user.uid === agreement.buyerId ? "buyer" : "seller";
+    const { text, senderName } = req.body;
+
+    await conversationService.notifyAdminsOfSupportMessage({
+      agreementId: req.params.id,
+      senderName: senderName || senderRole,
+      senderRole,
+      text,
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Support-message admin notify failed:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
 router.get("/agreements", async (req, res) => {
   try {
     const agreements = await escrowService.listForUser(req.user.uid);
