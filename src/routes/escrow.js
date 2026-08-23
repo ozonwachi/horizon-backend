@@ -282,12 +282,13 @@ router.post(
   requireAdmin,
   async (req, res) => {
     try {
-      const { outcome } = req.body; // "release" | "refund"
+      const { outcome, reason } = req.body; // "release" | "refund", reason optional
       const updated = await escrowService.adminResolveTranche(
         req.params.id,
         req.params.trancheId,
         outcome,
-        req.user.uid
+        req.user.uid,
+        reason
       );
       res.json(updated);
     } catch (err) {

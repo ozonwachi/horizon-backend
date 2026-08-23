@@ -328,9 +328,48 @@ async function markReleased(agreementId) {
   return result;
 }
 
-// Core tranche release logic, shared by confirmTrancheRelease (buyer-driven)
-// and releaseExpiredTranches (cron-driven). Not exported directly.
-async function _releaseTrancheInTransaction(tx, docRef, data, trancheId) {
+// Single source of truth for "what should the deal-level status be, given
+// these tranches" - called after every tranche mutation (release, refund,
+// dispute) so RELEASED/REFUNDED/PARTIALLY_RELEASED mean the same thing
+// everywhere. Before this existed, several call sites each had their own
+// "allReleased ? RELEASED : PARTIALLY_RELEASED" ternary that never checked
+// for REFUNDED - a deal where every tranche was refunded to the buyer would
+// incorrectly show as "Released" (implying the seller got paid) instead of
+// "Refunded", and the Admin Dashboard's Refunded filter would never match
+// anything as a result.
+function computeAgreementStatus(tranches) {
+  if (tranches.some((t) => t.status === TrancheStatus.DISPUTED)) {
+    return EscrowStatus.DISPUTED;
+  }
+  const allSettled = tranches.every(
+    (t) => t.status === TrancheStatus.RELEASED || t.status === TrancheStatus.REFUNDED
+  );
+  if (!allSettled) {
+    return EscrowStatus.PARTIALLY_RELEASED;
+  }
+  if (tranches.every((t) => t.status === TrancheStatus.REFUNDED)) {
+    return EscrowStatus.REFUNDED;
+  }
+  if (tranches.every((t) => t.status === TrancheStatus.RELEASED)) {
+    return EscrowStatus.RELEASED;
+  }
+  // Fully settled, but split between some tranches released and others
+  // refunded - there's no existing status that means "half went to the
+  // seller, half came back to the buyer". RELEASED is the closest existing
+  // label (money is fully and finally distributed, nothing left pending).
+  return EscrowStatus.RELEASED;
+}
+
+// Core tranche release logic, shared by confirmTrancheRelease (buyer-driven),
+// releaseExpiredTranches (cron-driven), and adminResolveTranche's "release"
+// outcome. Not exported directly.
+//
+// [adminResolution], when passed, is stamped directly onto the tranche
+// (not just the audit log) so the tranche itself remembers who released it
+// and why - EscrowDetailScreen shows this on the tranche card, so "who did
+// I release this to and why" is visible without digging through the audit
+// log. Left null for the ordinary buyer-driven and cron paths.
+async function _releaseTrancheInTransaction(tx, docRef, data, trancheId, adminResolution = null) {
   const tranches = data.tranches || [];
   const index = tranches.findIndex((t) => t.id === trancheId);
   if (index === -1) throw new Error("Tranche not found");
@@ -339,7 +378,18 @@ async function _releaseTrancheInTransaction(tx, docRef, data, trancheId) {
   if (tranche.status === TrancheStatus.RELEASED) {
     return { alreadyReleased: true, tranches, status: data.status };
   }
-  if (tranche.status === TrancheStatus.DISPUTED) {
+  // This guard exists for the ordinary paths that share this function -
+  // a buyer confirming release (confirmTrancheRelease) or the cron job
+  // (releaseExpiredTranches) should never be able to release a tranche
+  // that's under dispute. adminResolveTranche's "release" outcome is the
+  // one legitimate exception: it already requires the tranche to BE
+  // disputed before it will even call in here (see "Tranche is not under
+  // dispute" above it), so this blanket check was contradicting that and
+  // making "release to seller" on a disputed tranche always fail, while
+  // "refund to buyer" worked fine since it never goes through this shared
+  // function. adminResolution is only ever set by that admin path, so
+  // skipping the guard when it's present is safe.
+  if (tranche.status === TrancheStatus.DISPUTED && !adminResolution) {
     throw new Error("Cannot release a disputed tranche");
   }
 
@@ -348,6 +398,7 @@ async function _releaseTrancheInTransaction(tx, docRef, data, trancheId) {
     ...tranche,
     status: TrancheStatus.RELEASED,
     releasedAt: admin.firestore.Timestamp.now(),
+    ...(adminResolution ? { adminResolution } : {}),
   };
 
   const walletRef = db.collection("wallets").doc(data.sellerId);
@@ -360,8 +411,8 @@ async function _releaseTrancheInTransaction(tx, docRef, data, trancheId) {
     { merge: true }
   );
 
-  const allReleased = updatedTranches.every((t) => t.status === TrancheStatus.RELEASED);
-  const newStatus = allReleased ? EscrowStatus.RELEASED : EscrowStatus.PARTIALLY_RELEASED;
+  const newStatus = computeAgreementStatus(updatedTranches);
+  const allReleased = newStatus === EscrowStatus.RELEASED;
   const nextReleaseEligibleAt = computeNextReleaseEligibleAt(updatedTranches);
 
   tx.update(docRef, {
@@ -555,11 +606,22 @@ async function disputeTranche(agreementId, trancheId, reason, actorUid) {
 // authentication/authorization is the Admin Panel's job - this function
 // assumes the caller (a route protected by an admin check) has already
 // verified the actor is an admin.
-async function adminResolveTranche(agreementId, trancheId, outcome, adminUid) {
+async function adminResolveTranche(agreementId, trancheId, outcome, adminUid, reason) {
   const docRef = db.collection(ESCROW_COLLECTION).doc(agreementId);
   let buyerId = null;
   let sellerId = null;
   let previousTrancheStatus = null;
+  let trancheLabel = null;
+  let trancheAmountKobo = null;
+
+  const adminResolution = adminUid
+    ? {
+        by: adminUid,
+        outcome,
+        reason: reason || null,
+        resolvedAt: admin.firestore.Timestamp.now(),
+      }
+    : null;
 
   const result = await db.runTransaction(async (tx) => {
     const snap = await tx.get(docRef);
@@ -573,13 +635,21 @@ async function adminResolveTranche(agreementId, trancheId, outcome, adminUid) {
     if (index === -1) throw new Error("Tranche not found");
     const tranche = tranches[index];
     previousTrancheStatus = tranche.status;
+    trancheLabel = tranche.label;
+    trancheAmountKobo = tranche.amountKobo;
 
     if (tranche.status !== TrancheStatus.DISPUTED) {
       throw new Error("Tranche is not under dispute");
     }
 
     if (outcome === "release") {
-      const releaseResult = await _releaseTrancheInTransaction(tx, docRef, data, trancheId);
+      const releaseResult = await _releaseTrancheInTransaction(
+        tx,
+        docRef,
+        data,
+        trancheId,
+        adminResolution
+      );
       // Callers always parse this as a full EscrowAgreement - return the
       // merged agreement, not the bare tranche/result fragment.
       return {
@@ -596,6 +666,7 @@ async function adminResolveTranche(agreementId, trancheId, outcome, adminUid) {
         ...tranche,
         status: TrancheStatus.REFUNDED,
         releasedAt: admin.firestore.Timestamp.now(),
+        ...(adminResolution ? { adminResolution } : {}),
       };
 
       const walletRef = db.collection("wallets").doc(data.buyerId);
@@ -608,15 +679,7 @@ async function adminResolveTranche(agreementId, trancheId, outcome, adminUid) {
         { merge: true }
       );
 
-      const stillDisputed = updatedTranches.some((t) => t.status === TrancheStatus.DISPUTED);
-      const allSettled = updatedTranches.every(
-        (t) => t.status === TrancheStatus.RELEASED || t.status === TrancheStatus.REFUNDED
-      );
-      const newStatus = stillDisputed
-        ? EscrowStatus.DISPUTED
-        : allSettled
-        ? EscrowStatus.RELEASED
-        : EscrowStatus.PARTIALLY_RELEASED;
+      const newStatus = computeAgreementStatus(updatedTranches);
 
       tx.update(docRef, {
         tranches: updatedTranches,
@@ -650,6 +713,8 @@ async function adminResolveTranche(agreementId, trancheId, outcome, adminUid) {
   );
 
   if (adminUid) {
+    const recipientUid = outcome === "refund" ? buyerId : sellerId;
+    const recipientRole = outcome === "refund" ? "buyer" : "seller";
     await recordAuditLog({
       userId: adminUid,
       action: "escrow_dispute_resolved",
@@ -657,8 +722,14 @@ async function adminResolveTranche(agreementId, trancheId, outcome, adminUid) {
       targetId: `${agreementId}/${trancheId}`,
       agreementId,
       previousValue: { status: previousTrancheStatus },
-      newValue: { status: outcome === "refund" ? TrancheStatus.REFUNDED : TrancheStatus.RELEASED },
-      reason: outcome,
+      newValue: {
+        status: outcome === "refund" ? TrancheStatus.REFUNDED : TrancheStatus.RELEASED,
+        trancheLabel,
+        amountKobo: trancheAmountKobo,
+        recipientUid,
+        recipientRole,
+      },
+      reason: reason || outcome,
     }).catch((err) => console.error("recordAuditLog (dispute resolved) failed:", err));
   }
 
@@ -984,6 +1055,12 @@ async function requestOrConfirmCancel(agreementId, actorUid) {
     tx.update(docRef, {
       status: EscrowStatus.CANCELLED,
       tranches: updatedTranches,
+      // Clear this now that cancellation is final - left set, it made both
+      // parties' detail screens permanently show the "confirm cancellation" /
+      // "waiting for the other party" banner even after the deal was already
+      // cancelled, since those checks only looked at cancelRequestedBy being
+      // non-null and never at the deal's actual status.
+      cancelRequestedBy: admin.firestore.FieldValue.delete(),
       cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
@@ -995,7 +1072,7 @@ async function requestOrConfirmCancel(agreementId, actorUid) {
       body: "Both parties confirmed cancellation - any unreleased funds have been refunded to the buyer.",
     };
 
-    return { ...data, status: EscrowStatus.CANCELLED, tranches: updatedTranches };
+    return { ...data, status: EscrowStatus.CANCELLED, tranches: updatedTranches, cancelRequestedBy: null };
   });
 
   if (notify) {
@@ -1219,12 +1296,22 @@ async function adminForceCancelDeal(agreementId, adminUid, decisions, reason) {
     for (const tranche of openTranches) {
       const outcome = decisions[tranche.id];
       const index = updatedTranches.findIndex((t) => t.id === tranche.id);
+      // Stamped on the tranche itself (not just the audit log) so the
+      // tranche card can show who this was resolved by and why, the same
+      // as adminResolveTranche.
+      const adminResolution = {
+        by: adminUid,
+        outcome,
+        reason,
+        resolvedAt: admin.firestore.Timestamp.now(),
+      };
 
       if (outcome === "release") {
         updatedTranches[index] = {
           ...tranche,
           status: TrancheStatus.RELEASED,
           releasedAt: admin.firestore.Timestamp.now(),
+          adminResolution,
         };
         const walletRef = db.collection("wallets").doc(sellerId);
         tx.set(
@@ -1235,12 +1322,20 @@ async function adminForceCancelDeal(agreementId, adminUid, decisions, reason) {
           },
           { merge: true }
         );
-        actionsSummary.push({ trancheId: tranche.id, outcome: "release", amountKobo: tranche.amountKobo });
+        actionsSummary.push({
+          trancheId: tranche.id,
+          trancheLabel: tranche.label,
+          outcome: "release",
+          amountKobo: tranche.amountKobo,
+          recipientUid: sellerId,
+          recipientRole: "seller",
+        });
       } else if (outcome === "refund") {
         updatedTranches[index] = {
           ...tranche,
           status: TrancheStatus.REFUNDED,
           releasedAt: admin.firestore.Timestamp.now(),
+          adminResolution,
         };
         const walletRef = db.collection("wallets").doc(buyerId);
         tx.set(
@@ -1251,7 +1346,14 @@ async function adminForceCancelDeal(agreementId, adminUid, decisions, reason) {
           },
           { merge: true }
         );
-        actionsSummary.push({ trancheId: tranche.id, outcome: "refund", amountKobo: tranche.amountKobo });
+        actionsSummary.push({
+          trancheId: tranche.id,
+          trancheLabel: tranche.label,
+          outcome: "refund",
+          amountKobo: tranche.amountKobo,
+          recipientUid: buyerId,
+          recipientRole: "buyer",
+        });
       } else {
         throw new Error(`Invalid outcome "${outcome}" for tranche ${tranche.id}`);
       }
