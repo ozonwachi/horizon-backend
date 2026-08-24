@@ -1,5 +1,5 @@
 const { db, auth } = require("../config/firebaseAdmin");
-const { notifyUser } = require("./notificationService");
+const { notifyUser, notifyUsers } = require("./notificationService");
 
 // Mirrors MessageService._conversationId in the Flutter app EXACTLY (sorted
 // pair of uids + item type/id) - see lib/services/message_service.dart. Do
@@ -76,9 +76,29 @@ async function notifyAdminsOfSupportMessage({ agreementId, senderName, senderRol
   );
 }
 
+// Called whenever a tranche or a whole agreement gets disputed
+// (disputeTranche / markDisputed in escrowService.js) - previously only the
+// OTHER party to the deal was notified, so a dispute could sit invisible
+// until an admin happened to open the Admin Dashboard and check. Fans a
+// notification out to every admin, same "whichever admin is around sees
+// it" pattern as notifyAdminsOfSupportMessage above.
+async function notifyAdminsOfDispute({ agreementId, reason }) {
+  const adminUids = await listAdminUids();
+  if (adminUids.length === 0) return;
+
+  await notifyUsers(adminUids, {
+    type: "escrow_disputed",
+    title: "Deal disputed - needs review",
+    body: reason ? `Reason: ${reason}` : "A deal was just disputed.",
+    relatedType: "escrow",
+    relatedId: agreementId,
+  });
+}
+
 module.exports = {
   escrowConversationId,
   getEscrowConversation,
   listAdminUids,
   notifyAdminsOfSupportMessage,
+  notifyAdminsOfDispute,
 };

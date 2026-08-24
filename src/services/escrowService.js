@@ -1,5 +1,6 @@
 const { db, admin } = require("../config/firebaseAdmin");
 const { notifyUser } = require("./notificationService");
+const { notifyAdminsOfDispute } = require("./conversationService");
 const { recordAuditLog } = require("./auditLogService");
 const {
   ADMIN_WALLET_UID,
@@ -627,6 +628,10 @@ async function disputeTranche(agreementId, trancheId, reason, actorUid) {
     }).catch((err) => console.error("notifyUser (escrow_disputed) failed:", err));
   }
 
+  await notifyAdminsOfDispute({ agreementId, reason }).catch((err) =>
+    console.error("notifyAdminsOfDispute failed:", err)
+  );
+
   return result;
 }
 
@@ -889,6 +894,10 @@ async function markDisputed(agreementId, reason, actorUid) {
       relatedId: agreementId,
     }).catch((err) => console.error("notifyUser (escrow_disputed) failed:", err));
   }
+
+  await notifyAdminsOfDispute({ agreementId, reason }).catch((err) =>
+    console.error("notifyAdminsOfDispute failed:", err)
+  );
 
   return updated;
 }

@@ -115,4 +115,38 @@ router.get("/admin-wallet/transactions", requireAdmin, async (req, res) => {
   }
 });
 
+// Admin: process pending withdrawal requests. Before this existed, nothing
+// in the app could ever move a request out of "pending" - the functions
+// underneath were already there, just never wired to a route or a screen.
+router.get("/admin/withdrawals", requireAdmin, async (req, res) => {
+  try {
+    const requests = await walletService.listAllWithdrawalsAdmin();
+    res.json(requests);
+  } catch (err) {
+    console.error("List all withdrawals failed:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post("/admin/withdrawals/:id/mark-paid", requireAdmin, async (req, res) => {
+  try {
+    const updated = await walletService.markWithdrawalPaid(req.params.id);
+    res.json(updated);
+  } catch (err) {
+    console.error("Mark withdrawal paid failed:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.post("/admin/withdrawals/:id/reject", requireAdmin, async (req, res) => {
+  try {
+    const { reason } = req.body;
+    const updated = await walletService.rejectWithdrawal(req.params.id, reason);
+    res.json(updated);
+  } catch (err) {
+    console.error("Reject withdrawal failed:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
 module.exports = router;

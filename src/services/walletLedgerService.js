@@ -14,7 +14,12 @@ const LEDGER_COLLECTION = "walletTransactions";
 // adminForceCancelDeal's split support in escrowService.js) - never
 // created implicitly, never a place money ends up by accident. Not a
 // real Firebase uid, so it can never collide with an actual user.
-const ADMIN_WALLET_UID = "__admin_wallet__";
+//
+// NOT "__admin_wallet__" - Firestore reserves every document/collection id
+// that both starts and ends with a double underscore for its own internal
+// use, and rejects writes to one with "Resource id ... is invalid because
+// it is reserved." Single leading/trailing underscores are fine.
+const ADMIN_WALLET_UID = "_admin_wallet_";
 
 // Call from inside an existing db.runTransaction(tx => ...), right
 // alongside the tx.set(...) that actually changes the wallet's

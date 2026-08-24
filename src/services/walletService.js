@@ -1,5 +1,7 @@
 const { db, admin } = require("../config/firebaseAdmin");
 const paystackService = require("./paystackService");
+const { notifyUser, notifyUsers } = require("./notificationService");
+const { listAdminUids } = require("./conversationService");
 const {
   ADMIN_WALLET_UID,
   TYPES: LEDGER_TYPES,
@@ -85,7 +87,7 @@ async function requestWithdrawal({
   const walletRef = db.collection(WALLETS_COLLECTION).doc(uid);
   const requestRef = db.collection(WITHDRAWALS_COLLECTION).doc();
 
-  return db.runTransaction(async (tx) => {
+  const request = await db.runTransaction(async (tx) => {
     const walletSnap = await tx.get(walletRef);
     const currentBalance = walletSnap.exists
       ? walletSnap.data().balanceKobo || 0
@@ -110,7 +112,7 @@ async function requestWithdrawal({
       reason: `Withdrawal to ${bankName} (${accountNumber})`,
     });
 
-    const request = {
+    const newRequest = {
       id: requestRef.id,
       uid,
       amountKobo,
@@ -121,10 +123,29 @@ async function requestWithdrawal({
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
-    tx.set(requestRef, request);
+    tx.set(requestRef, newRequest);
 
-    return request;
+    return newRequest;
   });
+
+  // Fire-and-forget, and deliberately outside the transaction above - a
+  // Firestore transaction can retry its callback on contention, and a
+  // notifyUser call inside it would then risk firing more than once for
+  // the same request. Nothing previously told admins a withdrawal request
+  // existed at all - it just sat pending until someone happened to look.
+  const adminUids = await listAdminUids().catch((err) => {
+    console.error("listAdminUids (withdrawal request) failed:", err);
+    return [];
+  });
+  await notifyUsers(adminUids, {
+    type: "withdrawal_requested",
+    title: "New withdrawal request",
+    body: `${accountName} requested ₦${(amountKobo / 100).toFixed(2)} to ${bankName} (${accountNumber}).`,
+    relatedType: "withdrawal",
+    relatedId: request.id,
+  }).catch((err) => console.error("notifyUsers (withdrawal_requested) failed:", err));
+
+  return request;
 }
 
 async function listWithdrawalsForUser(uid) {
@@ -136,20 +157,63 @@ async function listWithdrawalsForUser(uid) {
   return snap.docs.map((doc) => doc.data());
 }
 
+// Admin-only: every withdrawal request across every user, newest first.
+// Deliberately no `where` clause - equality-filter-plus-orderBy is exactly
+// the query shape that needs a Firestore composite index (see
+// listWithdrawalsForUser/listWalletTransactions above, and the identical
+// gotcha already documented in notifications_screen.dart on the Flutter
+// side). A single-field orderBy needs no composite index at all, so the
+// Admin Withdrawals screen filters by status client-side instead of
+// pushing that requirement onto a brand new collection query.
+async function listAllWithdrawalsAdmin(limit = 200) {
+  const snap = await db
+    .collection(WITHDRAWALS_COLLECTION)
+    .orderBy("createdAt", "desc")
+    .limit(limit)
+    .get();
+  return snap.docs.map((doc) => doc.data());
+}
+
 async function markWithdrawalPaid(requestId) {
   const ref = db.collection(WITHDRAWALS_COLLECTION).doc(requestId);
-  await ref.update({
-    status: WithdrawalStatus.PAID,
-    paidAt: admin.firestore.FieldValue.serverTimestamp(),
-    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+
+  // Was a plain unconditional update before - nothing stopped a second
+  // "Mark Paid" tap (or a request that had already been rejected) from
+  // going through again and re-notifying the requester. Guarded the same
+  // way rejectWithdrawal already was.
+  const updated = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new Error("Withdrawal request not found");
+    const data = snap.data();
+
+    if (data.status !== WithdrawalStatus.PENDING) {
+      throw new Error(`Cannot mark a request with status "${data.status}" as paid`);
+    }
+
+    tx.update(ref, {
+      status: WithdrawalStatus.PAID,
+      paidAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return { ...data, status: WithdrawalStatus.PAID };
   });
-  return (await ref.get()).data();
+
+  await notifyUser(updated.uid, {
+    type: "withdrawal_paid",
+    title: "Withdrawal paid",
+    body: `Your ₦${(updated.amountKobo / 100).toFixed(2)} withdrawal to ${updated.bankName} has been paid.`,
+    relatedType: "withdrawal",
+    relatedId: requestId,
+  }).catch((err) => console.error("notifyUser (withdrawal_paid) failed:", err));
+
+  return updated;
 }
 
 async function rejectWithdrawal(requestId, reason) {
   const ref = db.collection(WITHDRAWALS_COLLECTION).doc(requestId);
 
-  return db.runTransaction(async (tx) => {
+  const updated = await db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) throw new Error("Withdrawal request not found");
     const data = snap.data();
@@ -182,6 +246,18 @@ async function rejectWithdrawal(requestId, reason) {
 
     return { ...data, status: WithdrawalStatus.REJECTED };
   });
+
+  await notifyUser(updated.uid, {
+    type: "withdrawal_rejected",
+    title: "Withdrawal rejected",
+    body: reason
+      ? `Your ₦${(updated.amountKobo / 100).toFixed(2)} withdrawal was rejected: ${reason}. It's been credited back to your wallet.`
+      : `Your ₦${(updated.amountKobo / 100).toFixed(2)} withdrawal was rejected. It's been credited back to your wallet.`,
+    relatedType: "withdrawal",
+    relatedId: requestId,
+  }).catch((err) => console.error("notifyUser (withdrawal_rejected) failed:", err));
+
+  return updated;
 }
 
 module.exports = {
@@ -194,6 +270,7 @@ module.exports = {
   verifyDeposit,
   requestWithdrawal,
   listWithdrawalsForUser,
+  listAllWithdrawalsAdmin,
   markWithdrawalPaid,
   rejectWithdrawal,
   // Own wallet history, and (admin-only, gated in the route) the admin
