@@ -1,16 +1,16 @@
-const { db, admin } = require("../config/firebaseAdmin");
+const { supabase } = require("../config/supabaseAdmin");
 
-const AUDIT_LOG_COLLECTION = "auditLogs";
+const AUDIT_LOG_TABLE = "audit_logs";
 
-// Admin-SDK-only collection (no client-facing Firestore rule - see
-// firestore.rules). Every admin override (generic escrow edit, tranche
-// dispute resolution, force-cancel, tranche edit, etc.) should write one of
-// these so there's a permanent record of who changed what and why.
+// Admin-SDK-only table (no client-facing RLS write policy - see
+// project_supabase_schema.sql). Every admin override (generic escrow edit,
+// tranche dispute resolution, force-cancel, tranche edit, etc.) writes one
+// of these so there's a permanent record of who changed what and why.
 //
 // `agreementId` is always the escrow agreement an action relates to (set
 // for both agreement-level and tranche-level actions), separate from
 // `targetId` (which for a tranche action is `${agreementId}/${trancheId}`).
-// Keeping a plain `agreementId` field lets listAuditLogs filter with a
+// Keeping a plain agreement_id column lets listAuditLogs filter with a
 // simple equality query instead of a targetId prefix hack.
 async function recordAuditLog({
   userId,
@@ -22,36 +22,50 @@ async function recordAuditLog({
   newValue,
   reason,
 }) {
-  await db.collection(AUDIT_LOG_COLLECTION).add({
-    userId,
+  const { error } = await supabase.from(AUDIT_LOG_TABLE).insert({
+    user_id: userId,
     action,
-    targetType,
-    targetId,
-    agreementId: agreementId || null,
-    previousValue: previousValue === undefined ? null : previousValue,
-    newValue: newValue === undefined ? null : newValue,
+    target_type: targetType,
+    target_id: targetId,
+    agreement_id: agreementId || null,
+    previous_value: previousValue === undefined ? null : previousValue,
+    new_value: newValue === undefined ? null : newValue,
     reason: reason || null,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
+  if (error) throw error;
+}
+
+function toAuditLogEntry(row) {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    action: row.action,
+    targetType: row.target_type,
+    targetId: row.target_id,
+    agreementId: row.agreement_id,
+    previousValue: row.previous_value,
+    newValue: row.new_value,
+    reason: row.reason,
+    createdAt: row.created_at,
+  };
 }
 
 // Lists audit log entries, most recent first. Pass `agreementId` to scope
 // to a single deal (powers the "evidence" panel on that deal's admin view);
 // omit it to list every admin action platform-wide (powers the global Audit
 // Log screen).
-//
-// NOTE: filtering by agreementId (equality) while ordering by createdAt
-// (a different field) requires a Firestore composite index - Firestore will
-// prompt with a direct console link the first time this runs with a filter,
-// same as listAllAgreements in escrowService.js.
 async function listAuditLogs({ agreementId, limit = 100 } = {}) {
-  let query = db.collection(AUDIT_LOG_COLLECTION).orderBy("createdAt", "desc");
+  let query = supabase
+    .from(AUDIT_LOG_TABLE)
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(Math.min(limit, 500));
   if (agreementId) {
-    query = query.where("agreementId", "==", agreementId);
+    query = query.eq("agreement_id", agreementId);
   }
-  query = query.limit(Math.min(limit, 500));
-  const snap = await query.get();
-  return snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+  const { data, error } = await query;
+  if (error) throw error;
+  return data.map(toAuditLogEntry);
 }
 
 module.exports = { recordAuditLog, listAuditLogs };

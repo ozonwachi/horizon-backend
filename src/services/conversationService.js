@@ -1,4 +1,4 @@
-const { db, auth } = require("../config/firebaseAdmin");
+const { supabase } = require("../config/supabaseAdmin");
 const { notifyUser, notifyUsers } = require("./notificationService");
 
 // Mirrors MessageService._conversationId in the Flutter app EXACTLY (sorted
@@ -10,47 +10,67 @@ function escrowConversationId(buyerId, sellerId, agreementId) {
   return `${sorted[0]}_${sorted[1]}_escrow_${agreementId}`;
 }
 
-// Firestore's client-facing rules only let the two participants read a
-// conversation's messages (see firestore.rules) - an admin looking at a
-// deal they're not a party to would get permission-denied going straight
-// through the Flutter Firestore SDK. This reads it via the Admin SDK
-// instead (bypasses rules, same pattern as everything else admin-only in
-// this backend) so the deal's "Evidence" panel can show what the buyer and
-// seller actually agreed on before an admin acts.
+// Postgres RLS on `conversations`/`messages` only lets the two participants
+// read a conversation (see project_supabase_schema.sql) - an admin looking
+// at a deal they're not a party to would get zero rows back going straight
+// through the Flutter Supabase client. This reads it via the service_role
+// client instead (bypasses RLS, same pattern as everything else admin-only
+// in this backend) so the deal's "Evidence" panel can show what the buyer
+// and seller actually agreed on before an admin acts.
+//
+// Moved from Firestore to Postgres alongside Task #27's Flutter migration -
+// message_service.dart now reads/writes conversations/messages in Postgres,
+// so this admin-only read has to follow or it would show stale/empty data.
 async function getEscrowConversation(buyerId, sellerId, agreementId) {
   const conversationId = escrowConversationId(buyerId, sellerId, agreementId);
-  const convoRef = db.collection("conversations").doc(conversationId);
-  const convoSnap = await convoRef.get();
 
-  if (!convoSnap.exists) {
+  const { data: convoRow, error: convoError } = await supabase
+    .from("conversations")
+    .select("participant_names")
+    .eq("id", conversationId)
+    .maybeSingle();
+  if (convoError) throw convoError;
+
+  if (!convoRow) {
     return { conversationId, exists: false, participantNames: {}, messages: [] };
   }
 
-  const convoData = convoSnap.data();
-  const messagesSnap = await convoRef.collection("messages").orderBy("sentAt", "asc").get();
-  const messages = messagesSnap.docs.map((doc) => {
-    const m = doc.data();
-    return { id: doc.id, senderId: m.senderId, text: m.text, sentAt: m.sentAt };
-  });
+  const { data: messageRows, error: messagesError } = await supabase
+    .from("messages")
+    .select("id, sender_id, text, sent_at")
+    .eq("conversation_id", conversationId)
+    .order("sent_at", { ascending: true });
+  if (messagesError) throw messagesError;
+
+  const messages = (messageRows || []).map((m) => ({
+    id: m.id,
+    senderId: m.sender_id,
+    text: m.text,
+    sentAt: m.sent_at,
+  }));
 
   return {
     conversationId,
     exists: true,
-    participantNames: convoData.participantNames || {},
+    participantNames: convoRow.participant_names || {},
     messages,
   };
 }
 
-// Finds every uid with the admin custom claim, so a buyer/seller messaging
-// into a deal's support conversation can notify all of them. There's no
-// separate "admins" roster collection today, so this asks Firebase Auth
-// directly. A single listUsers page (up to 1000 accounts) covers this
-// platform's current scale - revisit with real pagination if that changes.
+// Finds every admin uid, so a buyer/seller messaging into a deal's support
+// conversation (or a new withdrawal request) can notify all of them.
+//
+// Used to ask Firebase Auth for the "admin" custom claim, but admin status
+// moved to profiles.is_admin in Postgres as part of the Supabase auth
+// migration (Task #24) - a Firebase custom claim wouldn't reflect reality
+// any more even for accounts that still had one. There's no separate
+// "admins" roster table, so this just queries profiles directly. Fine at
+// this platform's current scale; revisit with pagination if the admin list
+// ever gets large.
 async function listAdminUids() {
-  const page = await auth.listUsers(1000);
-  return page.users
-    .filter((u) => u.customClaims && u.customClaims.admin === true)
-    .map((u) => u.uid);
+  const { data, error } = await supabase.from("profiles").select("uid").eq("is_admin", true);
+  if (error) throw error;
+  return data.map((row) => row.uid);
 }
 
 // Called right after a buyer or seller posts into a deal's support

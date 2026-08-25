@@ -1,7 +1,6 @@
 const express = require("express");
 const { requireAuth, requireAdmin } = require("../middleware/auth");
 const walletService = require("../services/walletService");
-const { auth: firebaseAuth } = require("../config/firebaseAdmin");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -19,11 +18,10 @@ router.get("/balance", async (req, res) => {
 router.post("/deposits", async (req, res) => {
   try {
     const { amountKobo } = req.body;
-    const user = await firebaseAuth.getUser(req.user.uid);
 
     const result = await walletService.initiateDeposit({
       uid: req.user.uid,
-      email: user.email,
+      email: req.user.email,
       amountKobo,
     });
 

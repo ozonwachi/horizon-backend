@@ -7,6 +7,8 @@ const helmet = require("helmet");
 const escrowRoutes = require("./routes/escrow");
 const walletRoutes = require("./routes/wallet");
 const conversationRoutes = require("./routes/conversations");
+const referralRoutes = require("./routes/referrals");
+const adminSettingsRoutes = require("./routes/adminSettings");
 const paystackWebhookRoutes = require("./routes/paystackWebhook");
 
 const app = express();
@@ -38,6 +40,8 @@ app.get("/health", (req, res) => {
 app.use("/escrow", escrowRoutes);
 app.use("/wallet", walletRoutes);
 app.use("/conversations", conversationRoutes);
+app.use("/referrals", referralRoutes);
+app.use("/admin", adminSettingsRoutes);
 
 // Catch-all error handler
 app.use((err, req, res, next) => {

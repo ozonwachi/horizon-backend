@@ -1,52 +1,41 @@
-const { db, admin } = require("../config/firebaseAdmin");
+const { supabase } = require("../config/supabaseAdmin");
 
 // Every wallet balance change - release, refund, deposit, withdrawal,
-// admin adjustment - writes one of these alongside it, in the same
-// Firestore transaction as the balance write itself. Before this existed,
-// a wallet's `balanceKobo` was the ONLY record of money moving through
-// it: the number changed but nothing said why, so "wallet screen has no
-// transaction history, the amount only adds" was a completely accurate
-// complaint. This collection is that missing history.
-const LEDGER_COLLECTION = "walletTransactions";
+// admin adjustment - writes one of these alongside it. The actual
+// balance-write-plus-ledger-row pairing now happens atomically inside the
+// Postgres wallet_adjust() function (see
+// project_supabase_migration_02_escrow_wallet_functions.sql) rather than a
+// Firestore transaction - the JS side just reads it back for display.
+const LEDGER_TABLE = "wallet_transactions";
 
 // A dedicated wallet for money an admin has explicitly decided doesn't
 // belong to the buyer or the seller when force-cancelling a deal (see
 // adminForceCancelDeal's split support in escrowService.js) - never
-// created implicitly, never a place money ends up by accident. Not a
-// real Firebase uid, so it can never collide with an actual user.
+// created implicitly, never a place money ends up by accident.
 //
-// NOT "__admin_wallet__" - Firestore reserves every document/collection id
-// that both starts and ends with a double underscore for its own internal
-// use, and rejects writes to one with "Resource id ... is invalid because
-// it is reserved." Single leading/trailing underscores are fine.
-const ADMIN_WALLET_UID = "_admin_wallet_";
-
-// Call from inside an existing db.runTransaction(tx => ...), right
-// alongside the tx.set(...) that actually changes the wallet's
-// balanceKobo - never on its own, so a ledger entry can never exist
-// without the balance change it's describing actually having happened
-// (or vice versa).
+// Firestore used a sentinel string ("_admin_wallet_") that could never
+// collide with a real uid. Postgres needs a real row in auth.users to
+// satisfy the wallets/wallet_transactions foreign keys, so this is now a
+// real Supabase Auth uid - create that account once via the Supabase
+// dashboard (Authentication > Users > Add user) and set its uuid as
+// ADMIN_WALLET_UID in the backend's environment. See the schema file's
+// seed note for the exact steps.
 //
-// [amountKobo] is signed: positive for money landing in the wallet,
-// negative for money leaving it (e.g. paying for a deal from wallet
-// balance, or a withdrawal). [type] is a short machine-readable label -
-// see the TYPES export below for the ones currently in use.
-function recordWalletTransaction(
-  tx,
-  { uid, amountKobo, type, agreementId, trancheId, reason, recipientRole }
-) {
-  const ref = db.collection(LEDGER_COLLECTION).doc();
-  tx.set(ref, {
-    uid,
-    amountKobo,
-    type,
-    agreementId: agreementId || null,
-    trancheId: trancheId || null,
-    reason: reason || null,
-    recipientRole: recipientRole || null,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
-  return ref.id;
+// Deliberately lazy (throws only when actually read) rather than crashing
+// the whole server at startup, since most of the backend works fine before
+// this one env var is set - only adminForceCancelDeal's "admin_wallet"
+// split option and the admin wallet screen need it.
+function getAdminWalletUid() {
+  const uid = process.env.ADMIN_WALLET_UID;
+  if (!uid) {
+    throw new Error(
+      "ADMIN_WALLET_UID is not set. Create a dedicated Supabase Auth user for " +
+        "the platform wallet (Authentication > Users > Add user), insert a " +
+        "matching row into public.profiles (is_admin = true) and public.wallets, " +
+        "then set ADMIN_WALLET_UID to that user's uuid in your environment."
+    );
+  }
+  return uid;
 }
 
 const TYPES = {
@@ -59,20 +48,40 @@ const TYPES = {
   ADMIN_FORCE_CANCEL: "admin_force_cancel", // a force-cancel split decision
 };
 
+// Row -> the same camelCase shape the Flutter WalletTransaction model and
+// the old Firestore doc.data() both used, so nothing downstream has to
+// change. createdAt is a plain ISO string - WalletTransaction._parseDate
+// already accepts that (it was written to accept either an ISO string or
+// Firestore's old {_seconds} shape).
+function toWalletTransaction(row) {
+  return {
+    id: row.id,
+    uid: row.uid,
+    amountKobo: row.amount_kobo,
+    type: row.type,
+    agreementId: row.agreement_id,
+    trancheId: row.tranche_id,
+    reason: row.reason,
+    recipientRole: row.recipient_role,
+    createdAt: row.created_at,
+  };
+}
+
 async function listWalletTransactions(uid, limit = 100) {
-  const snap = await db
-    .collection(LEDGER_COLLECTION)
-    .where("uid", "==", uid)
-    .orderBy("createdAt", "desc")
-    .limit(limit)
-    .get();
-  return snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+  const { data, error } = await supabase
+    .from(LEDGER_TABLE)
+    .select("*")
+    .eq("uid", uid)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data.map(toWalletTransaction);
 }
 
 module.exports = {
-  LEDGER_COLLECTION,
-  ADMIN_WALLET_UID,
+  LEDGER_TABLE,
+  getAdminWalletUid,
   TYPES,
-  recordWalletTransaction,
+  toWalletTransaction,
   listWalletTransactions,
 };

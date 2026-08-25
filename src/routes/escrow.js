@@ -2,7 +2,6 @@ const express = require("express");
 const { requireAuth, requireAdmin } = require("../middleware/auth");
 const escrowService = require("../services/escrowService");
 const paystackService = require("../services/paystackService");
-const { auth: firebaseAuth } = require("../config/firebaseAdmin");
 const auditLogService = require("../services/auditLogService");
 const conversationService = require("../services/conversationService");
 
@@ -85,11 +84,10 @@ router.post("/agreements/:id/pay", async (req, res) => {
       return res.status(403).json({ error: "Not your agreement" });
     }
 
-    const buyer = await firebaseAuth.getUser(req.user.uid);
     const reference = `horizon_${agreement.id}_${Date.now()}`;
 
     const tx = await paystackService.initializeTransaction({
-      email: buyer.email,
+      email: req.user.email,
       amountKobo: agreement.amountKobo + agreement.commissionKobo,
       reference,
       metadata: { agreementId: agreement.id, buyerId: req.user.uid },
@@ -360,9 +358,10 @@ router.get("/agreements/admin/audit-log", requireAdmin, async (req, res) => {
 
 // Admin-only read of the buyer/seller chat thread tied to this deal, so an
 // admin can see what the two parties actually agreed on before acting.
-// Goes through the Admin SDK because Firestore's client rules only let the
-// two participants read a conversation directly (see firestore.rules) -
-// an admin viewing someone else's deal isn't a participant.
+// Goes through the service_role Supabase client because RLS on
+// conversations/messages only lets the two participants read a
+// conversation directly (see project_supabase_schema.sql) - an admin
+// viewing someone else's deal isn't a participant.
 router.get("/agreements/:id/admin-conversation", requireAdmin, async (req, res) => {
   try {
     const agreement = await escrowService.getAgreement(req.params.id);
@@ -380,7 +379,7 @@ router.get("/agreements/:id/admin-conversation", requireAdmin, async (req, res) 
 });
 
 // Buyer/seller send their support-conversation messages straight to
-// Firestore from the Flutter app (see MessageService.sendMessage) - there's
+// Postgres from the Flutter app (see MessageService.sendMessage) - there's
 // no backend involvement in the send itself. This is a notify-only
 // follow-up call right after that write, so an admin actually finds out a
 // message came in instead of only seeing it if they happen to open the

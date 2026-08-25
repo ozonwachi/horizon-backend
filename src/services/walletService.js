@@ -1,16 +1,11 @@
-const { db, admin } = require("../config/firebaseAdmin");
+const { supabase } = require("../config/supabaseAdmin");
 const paystackService = require("./paystackService");
 const { notifyUser, notifyUsers } = require("./notificationService");
 const { listAdminUids } = require("./conversationService");
-const {
-  ADMIN_WALLET_UID,
-  TYPES: LEDGER_TYPES,
-  recordWalletTransaction,
-  listWalletTransactions,
-} = require("./walletLedgerService");
+const { getAdminWalletUid, TYPES: LEDGER_TYPES, listWalletTransactions } = require("./walletLedgerService");
 
-const WALLETS_COLLECTION = "wallets";
-const WITHDRAWALS_COLLECTION = "withdrawalRequests";
+const WALLETS_TABLE = "wallets";
+const WITHDRAWALS_TABLE = "withdrawal_requests";
 
 const WithdrawalStatus = {
   PENDING: "pending",
@@ -18,25 +13,43 @@ const WithdrawalStatus = {
   REJECTED: "rejected",
 };
 
+// Row -> the camelCase shape WithdrawalRequest.fromJson (Flutter) and the
+// old Firestore doc.data() both used.
+function toWithdrawalRequest(row) {
+  return {
+    id: row.id,
+    uid: row.uid,
+    amountKobo: row.amount_kobo,
+    bankName: row.bank_name,
+    accountNumber: row.account_number,
+    accountName: row.account_name,
+    status: row.status,
+    createdAt: row.created_at,
+    rejectionReason: row.rejection_reason,
+  };
+}
+
 async function getBalance(uid) {
-  const snap = await db.collection(WALLETS_COLLECTION).doc(uid).get();
-  if (!snap.exists) return 0;
-  return snap.data().balanceKobo || 0;
+  const { data, error } = await supabase
+    .from(WALLETS_TABLE)
+    .select("balance_kobo")
+    .eq("uid", uid)
+    .maybeSingle();
+  if (error) throw error;
+  return data?.balance_kobo || 0;
 }
 
 async function creditWallet(uid, amountKobo, { type = LEDGER_TYPES.DEPOSIT, reason } = {}) {
-  const walletRef = db.collection(WALLETS_COLLECTION).doc(uid);
-  await db.runTransaction(async (tx) => {
-    tx.set(
-      walletRef,
-      {
-        balanceKobo: admin.firestore.FieldValue.increment(amountKobo),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-    recordWalletTransaction(tx, { uid, amountKobo, type, reason });
+  const { error } = await supabase.rpc("wallet_adjust", {
+    p_uid: uid,
+    p_amount_kobo: amountKobo,
+    p_type: type,
+    p_agreement_id: null,
+    p_tranche_id: null,
+    p_reason: reason || null,
+    p_recipient_role: null,
   });
+  if (error) throw error;
   return getBalance(uid);
 }
 
@@ -70,13 +83,7 @@ async function verifyDeposit({ uid, reference }) {
   return confirmDeposit({ uid, amountKobo: tx.amount, reference });
 }
 
-async function requestWithdrawal({
-  uid,
-  amountKobo,
-  bankName,
-  accountNumber,
-  accountName,
-}) {
+async function requestWithdrawal({ uid, amountKobo, bankName, accountNumber, accountName }) {
   if (!amountKobo || amountKobo <= 0) {
     throw new Error("amountKobo must be greater than 0");
   }
@@ -84,55 +91,27 @@ async function requestWithdrawal({
     throw new Error("bankName, accountNumber, and accountName are required");
   }
 
-  const walletRef = db.collection(WALLETS_COLLECTION).doc(uid);
-  const requestRef = db.collection(WITHDRAWALS_COLLECTION).doc();
-
-  const request = await db.runTransaction(async (tx) => {
-    const walletSnap = await tx.get(walletRef);
-    const currentBalance = walletSnap.exists
-      ? walletSnap.data().balanceKobo || 0
-      : 0;
-
-    if (amountKobo > currentBalance) {
-      throw new Error("Requested amount exceeds available balance");
-    }
-
-    tx.set(
-      walletRef,
-      {
-        balanceKobo: admin.firestore.FieldValue.increment(-amountKobo),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-    recordWalletTransaction(tx, {
-      uid,
-      amountKobo: -amountKobo,
-      type: LEDGER_TYPES.WITHDRAWAL,
-      reason: `Withdrawal to ${bankName} (${accountNumber})`,
-    });
-
-    const newRequest = {
-      id: requestRef.id,
-      uid,
-      amountKobo,
-      bankName,
-      accountNumber,
-      accountName,
-      status: WithdrawalStatus.PENDING,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
-    tx.set(requestRef, newRequest);
-
-    return newRequest;
+  const { data: requestId, error } = await supabase.rpc("wallet_request_withdrawal", {
+    p_uid: uid,
+    p_amount_kobo: amountKobo,
+    p_bank_name: bankName,
+    p_account_number: accountNumber,
+    p_account_name: accountName,
   });
+  if (error) throw new Error(error.message);
 
-  // Fire-and-forget, and deliberately outside the transaction above - a
-  // Firestore transaction can retry its callback on contention, and a
-  // notifyUser call inside it would then risk firing more than once for
-  // the same request. Nothing previously told admins a withdrawal request
-  // existed at all - it just sat pending until someone happened to look.
+  const { data: row, error: fetchError } = await supabase
+    .from(WITHDRAWALS_TABLE)
+    .select("*")
+    .eq("id", requestId)
+    .single();
+  if (fetchError) throw fetchError;
+  const request = toWithdrawalRequest(row);
+
+  // Fire-and-forget, deliberately outside the RPC above (same reasoning as
+  // before: a notify call shouldn't be able to make the transactional part
+  // retry). Nothing previously told admins a withdrawal request existed at
+  // all - it just sat pending until someone happened to look.
   const adminUids = await listAdminUids().catch((err) => {
     console.error("listAdminUids (withdrawal request) failed:", err);
     return [];
@@ -149,55 +128,32 @@ async function requestWithdrawal({
 }
 
 async function listWithdrawalsForUser(uid) {
-  const snap = await db
-    .collection(WITHDRAWALS_COLLECTION)
-    .where("uid", "==", uid)
-    .orderBy("createdAt", "desc")
-    .get();
-  return snap.docs.map((doc) => doc.data());
+  const { data, error } = await supabase
+    .from(WITHDRAWALS_TABLE)
+    .select("*")
+    .eq("uid", uid)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return data.map(toWithdrawalRequest);
 }
 
 // Admin-only: every withdrawal request across every user, newest first.
-// Deliberately no `where` clause - equality-filter-plus-orderBy is exactly
-// the query shape that needs a Firestore composite index (see
-// listWithdrawalsForUser/listWalletTransactions above, and the identical
-// gotcha already documented in notifications_screen.dart on the Flutter
-// side). A single-field orderBy needs no composite index at all, so the
-// Admin Withdrawals screen filters by status client-side instead of
-// pushing that requirement onto a brand new collection query.
 async function listAllWithdrawalsAdmin(limit = 200) {
-  const snap = await db
-    .collection(WITHDRAWALS_COLLECTION)
-    .orderBy("createdAt", "desc")
-    .limit(limit)
-    .get();
-  return snap.docs.map((doc) => doc.data());
+  const { data, error } = await supabase
+    .from(WITHDRAWALS_TABLE)
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data.map(toWithdrawalRequest);
 }
 
 async function markWithdrawalPaid(requestId) {
-  const ref = db.collection(WITHDRAWALS_COLLECTION).doc(requestId);
-
-  // Was a plain unconditional update before - nothing stopped a second
-  // "Mark Paid" tap (or a request that had already been rejected) from
-  // going through again and re-notifying the requester. Guarded the same
-  // way rejectWithdrawal already was.
-  const updated = await db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    if (!snap.exists) throw new Error("Withdrawal request not found");
-    const data = snap.data();
-
-    if (data.status !== WithdrawalStatus.PENDING) {
-      throw new Error(`Cannot mark a request with status "${data.status}" as paid`);
-    }
-
-    tx.update(ref, {
-      status: WithdrawalStatus.PAID,
-      paidAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    return { ...data, status: WithdrawalStatus.PAID };
+  const { data: row, error } = await supabase.rpc("wallet_mark_withdrawal_paid", {
+    p_request_id: requestId,
   });
+  if (error) throw new Error(error.message);
+  const updated = toWithdrawalRequest(row);
 
   await notifyUser(updated.uid, {
     type: "withdrawal_paid",
@@ -211,41 +167,12 @@ async function markWithdrawalPaid(requestId) {
 }
 
 async function rejectWithdrawal(requestId, reason) {
-  const ref = db.collection(WITHDRAWALS_COLLECTION).doc(requestId);
-
-  const updated = await db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    if (!snap.exists) throw new Error("Withdrawal request not found");
-    const data = snap.data();
-
-    if (data.status !== WithdrawalStatus.PENDING) {
-      throw new Error(`Cannot reject a request with status "${data.status}"`);
-    }
-
-    const walletRef = db.collection(WALLETS_COLLECTION).doc(data.uid);
-    tx.set(
-      walletRef,
-      {
-        balanceKobo: admin.firestore.FieldValue.increment(data.amountKobo),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-    recordWalletTransaction(tx, {
-      uid: data.uid,
-      amountKobo: data.amountKobo,
-      type: LEDGER_TYPES.WITHDRAWAL_REJECTED,
-      reason: reason || "Withdrawal request rejected",
-    });
-
-    tx.update(ref, {
-      status: WithdrawalStatus.REJECTED,
-      rejectionReason: reason || null,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    return { ...data, status: WithdrawalStatus.REJECTED };
+  const { data: row, error } = await supabase.rpc("wallet_reject_withdrawal", {
+    p_request_id: requestId,
+    p_reason: reason || null,
   });
+  if (error) throw new Error(error.message);
+  const updated = toWithdrawalRequest(row);
 
   await notifyUser(updated.uid, {
     type: "withdrawal_rejected",
@@ -262,7 +189,6 @@ async function rejectWithdrawal(requestId, reason) {
 
 module.exports = {
   WithdrawalStatus,
-  ADMIN_WALLET_UID,
   getBalance,
   creditWallet,
   initiateDeposit,
@@ -274,9 +200,10 @@ module.exports = {
   markWithdrawalPaid,
   rejectWithdrawal,
   // Own wallet history, and (admin-only, gated in the route) the admin
-  // wallet's balance/history - same underlying ledger collection, just a
-  // different uid.
+  // wallet's balance/history - same underlying ledger table, just a
+  // different uid. getAdminWalletUid() throws with a clear message if
+  // ADMIN_WALLET_UID hasn't been configured yet - see walletLedgerService.js.
   listTransactions: listWalletTransactions,
-  getAdminWalletBalance: () => getBalance(ADMIN_WALLET_UID),
-  listAdminWalletTransactions: (limit) => listWalletTransactions(ADMIN_WALLET_UID, limit),
+  getAdminWalletBalance: () => getBalance(getAdminWalletUid()),
+  listAdminWalletTransactions: (limit) => listWalletTransactions(getAdminWalletUid(), limit),
 };
