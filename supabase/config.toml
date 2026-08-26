@@ -1,0 +1,22 @@
+# Every function does its own auth (see supabase/functions/_shared/auth.ts)
+# instead of relying on the platform's JWT gate, so verify_jwt is false
+# across the board - webhooks needs this (Paystack sends no Supabase JWT
+# at all), and the rest match it for one consistent auth model instead of
+# mixing platform-level and application-level auth.
+[functions.escrow]
+verify_jwt = false
+
+[functions.wallet]
+verify_jwt = false
+
+[functions.conversations]
+verify_jwt = false
+
+[functions.referrals]
+verify_jwt = false
+
+[functions.admin]
+verify_jwt = false
+
+[functions.webhooks]
+verify_jwt = false
