@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { Buffer } from "node:buffer";
 import { requireSecret } from "./supabaseAdmin.ts";
 
 const PAYSTACK_BASE_URL = "https://api.paystack.co";
