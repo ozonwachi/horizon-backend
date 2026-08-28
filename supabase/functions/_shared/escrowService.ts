@@ -9,6 +9,7 @@ const AGREEMENTS_TABLE = "escrow_agreements";
 const TRANCHES_TABLE = "escrow_tranches";
 const COMMISSION_TABLE = "commission_rules";
 const SETTINGS_TABLE = "platform_settings";
+const TIERS_TABLE = "commission_tiers";
 
 // Fields a generic admin edit (adminUpdateAgreement) is allowed to touch.
 // Status transitions have their own dedicated, invariant-preserving
@@ -151,6 +152,42 @@ export async function calculateCommission(
   supabase: SupabaseClient,
   { type, category, amountKobo }: { type: string; category?: string | null; amountKobo: number }
 ) {
+  // Amount-based tiers (Task: variable commission by deal size) take
+  // priority over the flat commission_rules override whenever any exist
+  // for this (type, category) - falls through to the code below completely
+  // unchanged when no tiers are configured, so this is backward compatible.
+  let tierQuery = supabase.from(TIERS_TABLE).select("*").eq("type", type);
+  tierQuery = category ? tierQuery.eq("category", category) : tierQuery.is("category", null);
+  const { data: tierRows, error: tierError } = await tierQuery.order("min_amount_kobo", { ascending: true });
+  if (tierError) throw tierError;
+
+  if (tierRows && tierRows.length > 0) {
+    // Exact match: amountKobo actually falls inside this tier's range.
+    let selectedTier = tierRows.find(
+      (t) => amountKobo >= t.min_amount_kobo && (t.max_amount_kobo == null || amountKobo <= t.max_amount_kobo)
+    );
+    // No exact match - extend to the nearest tier rather than falling back
+    // to the platform default, per product decision: below the lowest
+    // tier's minimum, use the lowest tier; above the highest tier's
+    // maximum (or landing in a gap between non-contiguous tiers), use the
+    // highest tier whose minimum the amount has already passed.
+    if (!selectedTier) {
+      if (amountKobo < tierRows[0].min_amount_kobo) {
+        selectedTier = tierRows[0];
+      } else {
+        selectedTier =
+          [...tierRows].reverse().find((t) => amountKobo >= t.min_amount_kobo) ?? tierRows[tierRows.length - 1];
+      }
+    }
+
+    const commissionKobo =
+      selectedTier.mode === "percentage"
+        ? Math.round((amountKobo * selectedTier.value) / 100)
+        : selectedTier.value;
+
+    return { commissionKobo, rule: selectedTier };
+  }
+
   let query = supabase.from(COMMISSION_TABLE).select("*").eq("type", type).limit(1);
   query = category ? query.eq("category", category) : query.is("category", null);
   const { data: rows, error } = await query;

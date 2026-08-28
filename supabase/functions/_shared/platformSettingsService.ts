@@ -3,6 +3,7 @@ import { recordAuditLog } from "./auditLogService.ts";
 
 const SETTINGS_TABLE = "platform_settings";
 const COMMISSION_TABLE = "commission_rules";
+const TIERS_TABLE = "commission_tiers";
 
 export type PlatformSettings = {
   adminCommissionType: string;
@@ -22,6 +23,16 @@ export type CommissionRule = {
   value: number;
   minKobo: number | null;
   maxKobo: number | null;
+};
+
+export type CommissionTier = {
+  id: string;
+  type: string;
+  category: string | null;
+  minAmountKobo: number;
+  maxAmountKobo: number | null;
+  mode: string;
+  value: number;
 };
 
 // deno-lint-ignore no-explicit-any
@@ -47,6 +58,19 @@ function toCommissionRule(row: any): CommissionRule {
     value: row.value,
     minKobo: row.min_kobo,
     maxKobo: row.max_kobo,
+  };
+}
+
+// deno-lint-ignore no-explicit-any
+function toCommissionTier(row: any): CommissionTier {
+  return {
+    id: row.id,
+    type: row.type,
+    category: row.category,
+    minAmountKobo: row.min_amount_kobo,
+    maxAmountKobo: row.max_amount_kobo,
+    mode: row.mode,
+    value: row.value,
   };
 }
 
@@ -204,4 +228,87 @@ export async function deleteCommissionRule(supabase: SupabaseClient, adminUid: s
     targetId: id,
     reason: null,
   }).catch((err) => console.error("recordAuditLog (commission_rule_deleted) failed:", err));
+}
+
+// Task: amount-based commission tiers - see escrowService.calculateCommission
+// for how these are actually applied. Unlike commission_rules (one row per
+// type/category), a type/category can have many tiers - one per amount
+// range - so these are plain create/delete, no upsert-by-key.
+export async function listCommissionTiers(supabase: SupabaseClient): Promise<CommissionTier[]> {
+  const { data, error } = await supabase
+    .from(TIERS_TABLE)
+    .select("*")
+    .order("type", { ascending: true })
+    .order("min_amount_kobo", { ascending: true });
+  if (error) throw error;
+  return (data || []).map(toCommissionTier);
+}
+
+export async function createCommissionTier(
+  supabase: SupabaseClient,
+  adminUid: string,
+  {
+    type,
+    category,
+    minAmountKobo,
+    maxAmountKobo,
+    mode,
+    value,
+  }: {
+    type: string;
+    category?: string | null;
+    minAmountKobo: number;
+    maxAmountKobo?: number | null;
+    mode: string;
+    value: number;
+  }
+): Promise<CommissionTier> {
+  if (!["listing", "job", "barter", "custom"].includes(type)) {
+    throw new Error(`Unknown commission type "${type}"`);
+  }
+  if (!["flat", "percentage"].includes(mode)) {
+    throw new Error(`Unknown commission mode "${mode}"`);
+  }
+  if (typeof minAmountKobo !== "number" || typeof value !== "number") {
+    throw new Error("minAmountKobo and value must be numbers");
+  }
+  if (maxAmountKobo != null && maxAmountKobo < minAmountKobo) {
+    throw new Error("maxAmountKobo cannot be less than minAmountKobo");
+  }
+
+  const row = {
+    type,
+    category: category || null,
+    min_amount_kobo: minAmountKobo,
+    max_amount_kobo: maxAmountKobo === undefined ? null : maxAmountKobo,
+    mode,
+    value,
+  };
+
+  const { data, error } = await supabase.from(TIERS_TABLE).insert(row).select().single();
+  if (error) throw error;
+
+  await recordAuditLog(supabase, {
+    userId: adminUid,
+    action: "commission_tier_created",
+    targetType: "commissionTier",
+    targetId: data.id,
+    newValue: toCommissionTier(data),
+    reason: null,
+  }).catch((err) => console.error("recordAuditLog (commission_tier_created) failed:", err));
+
+  return toCommissionTier(data);
+}
+
+export async function deleteCommissionTier(supabase: SupabaseClient, adminUid: string, id: string): Promise<void> {
+  const { error } = await supabase.from(TIERS_TABLE).delete().eq("id", id);
+  if (error) throw error;
+
+  await recordAuditLog(supabase, {
+    userId: adminUid,
+    action: "commission_tier_deleted",
+    targetType: "commissionTier",
+    targetId: id,
+    reason: null,
+  }).catch((err) => console.error("recordAuditLog (commission_tier_deleted) failed:", err));
 }

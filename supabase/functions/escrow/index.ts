@@ -1,7 +1,7 @@
 import { Hono } from "npm:hono@4";
 import { cors } from "npm:hono@4/cors";
 import { getAdminClient } from "../_shared/supabaseAdmin.ts";
-import { requireAuth, requireAdmin, type AppEnv } from "../_shared/auth.ts";
+import { requireAuth, requireAdmin, requireActiveAccount, type AppEnv } from "../_shared/auth.ts";
 import * as escrowService from "../_shared/escrowService.ts";
 import * as paystackService from "../_shared/paystackService.ts";
 import { listAuditLogs } from "../_shared/auditLogService.ts";
@@ -41,7 +41,7 @@ app.post("/internal/flag-overdue-tranches", async (c) => {
   }
 });
 
-app.post("/agreements", requireAuth, async (c) => {
+app.post("/agreements", requireAuth, requireActiveAccount, async (c) => {
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   const { sellerId, type, category, amountKobo, terms, referenceId, title, description, tranches } = body || {};
@@ -70,7 +70,7 @@ app.post("/agreements", requireAuth, async (c) => {
   }
 });
 
-app.post("/agreements/:id/pay", requireAuth, async (c) => {
+app.post("/agreements/:id/pay", requireAuth, requireActiveAccount, async (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
   try {
@@ -96,7 +96,7 @@ app.post("/agreements/:id/pay", requireAuth, async (c) => {
   }
 });
 
-app.post("/agreements/:id/pay-with-wallet", requireAuth, async (c) => {
+app.post("/agreements/:id/pay-with-wallet", requireAuth, requireActiveAccount, async (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
   try {
@@ -108,7 +108,7 @@ app.post("/agreements/:id/pay-with-wallet", requireAuth, async (c) => {
   }
 });
 
-app.post("/agreements/:id/verify", requireAuth, async (c) => {
+app.post("/agreements/:id/verify", requireAuth, requireActiveAccount, async (c) => {
   const id = c.req.param("id")!;
   const body = await c.req.json().catch(() => ({}));
   const reference = body?.reference;
@@ -130,7 +130,7 @@ app.post("/agreements/:id/verify", requireAuth, async (c) => {
 
 // Legacy whole-agreement release - only valid for old single-tranche
 // agreements. New tranche-based agreements use /release-tranche below.
-app.post("/agreements/:id/release", requireAuth, async (c) => {
+app.post("/agreements/:id/release", requireAuth, requireActiveAccount, async (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
   try {
@@ -152,7 +152,7 @@ app.post("/agreements/:id/release", requireAuth, async (c) => {
 // tranche is a plain buyer_confirmation tranche, or a timed tranche the
 // buyer wants to release early / after its window has passed - the timer
 // only ever makes a tranche eligible, never releases it by itself.
-app.post("/agreements/:id/tranches/:trancheId/release", requireAuth, async (c) => {
+app.post("/agreements/:id/tranches/:trancheId/release", requireAuth, requireActiveAccount, async (c) => {
   const user = c.get("user");
   try {
     const updated = await escrowService.confirmTrancheRelease(

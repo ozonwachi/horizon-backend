@@ -2,18 +2,100 @@ import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { getAdminWalletUid } from "./walletLedgerService.ts";
 import { notifyUser } from "./notificationService.ts";
 
-// Links a brand-new signup to whoever referred them. The actual validation
-// (no self-referral, referral code matches a real user, this account hasn't
-// already been linked) lives in the referral_link Postgres function so it
-// can't be bypassed by calling the table directly - there's deliberately no
-// INSERT policy on public.referrals for regular users.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Excludes visually-ambiguous characters (0/O, 1/I/L) so a code read aloud
+// or copied from a screenshot doesn't get mistyped.
+const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const CODE_LENGTH = 7;
+
+function randomCode(): string {
+  let code = "";
+  for (let i = 0; i < CODE_LENGTH; i++) {
+    code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
+  }
+  return code;
+}
+
+// Every account gets a short referral_code the first time it's needed
+// (called from getReferralSummary) rather than backfilled in the migration -
+// same self-healing pattern as ensureProfileExists. Retries a few times on
+// the rare random collision (unique index on profiles.referral_code).
+export async function ensureReferralCode(supabase: SupabaseClient, uid: string): Promise<string> {
+  const { data: existing, error: existingError } = await supabase
+    .from("profiles")
+    .select("referral_code")
+    .eq("uid", uid)
+    .single();
+  if (existingError) throw existingError;
+  if (existing.referral_code) return existing.referral_code;
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const candidate = randomCode();
+    const { data, error } = await supabase
+      .from("profiles")
+      .update({ referral_code: candidate })
+      .eq("uid", uid)
+      .is("referral_code", null) // avoid clobbering a code set by a concurrent call
+      .select("referral_code")
+      .maybeSingle();
+    if (error) {
+      // Unique violation (23505) means another account grabbed that code in
+      // the same instant - just try another candidate.
+      if ((error as { code?: string }).code === "23505") continue;
+      throw error;
+    }
+    if (data?.referral_code) return data.referral_code;
+
+    // No row updated: either a concurrent call already set one (re-fetch and
+    // use it) or something else changed - either way, check current state.
+    const { data: recheck, error: recheckError } = await supabase
+      .from("profiles")
+      .select("referral_code")
+      .eq("uid", uid)
+      .single();
+    if (recheckError) throw recheckError;
+    if (recheck.referral_code) return recheck.referral_code;
+  }
+  throw new Error("Could not generate a unique referral code - please try again.");
+}
+
+// Accepts either the historical long form (a referrer's raw uid, for codes/
+// links shared before short codes existed - kept working forever) or the
+// newer short referral_code. Returns null if neither resolves to a real
+// account.
+async function resolveReferrerUid(supabase: SupabaseClient, code: string): Promise<string | null> {
+  if (UUID_RE.test(code)) {
+    const { data, error } = await supabase.from("profiles").select("uid").eq("uid", code).maybeSingle();
+    if (error) throw error;
+    return data?.uid ?? null;
+  }
+
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("uid")
+    .eq("referral_code", code.trim().toUpperCase())
+    .maybeSingle();
+  if (error) throw error;
+  return data?.uid ?? null;
+}
+
+// Links a brand-new signup to whoever referred them. The actual relationship
+// validation (no self-referral, this account hasn't already been linked)
+// lives in the referral_link Postgres function so it can't be bypassed by
+// calling the table directly - there's deliberately no INSERT policy on
+// public.referrals for regular users. Resolving the code (short or long
+// form) to a uid happens here first, since referral_link only knows uids.
 export async function linkReferral(
   supabase: SupabaseClient,
   referredUid: string,
   referrerCode: string
 ): Promise<void> {
-  const referrerUid = (referrerCode || "").trim();
-  if (!referrerUid) throw new Error("No referral code provided.");
+  const raw = (referrerCode || "").trim();
+  if (!raw) throw new Error("No referral code provided.");
+
+  const referrerUid = await resolveReferrerUid(supabase, raw);
+  if (!referrerUid) throw new Error("That referral code doesn't match any account.");
 
   const { error } = await supabase.rpc("referral_link", {
     p_referrer_uid: referrerUid,
@@ -82,6 +164,10 @@ export async function processReferralPayoutsForAgreement(
 
 export type ReferralSummary = {
   referralCode: string;
+  // Present only once HORIZON_APP_URL is configured (see getReferralLink) -
+  // until then referralCode alone is still fully usable, just not as a
+  // tap-to-open link.
+  referralLink: string | null;
   maxPayoutsPerReferredUser: number;
   totalEarnedKobo: number;
   referrals: Array<{
@@ -93,14 +179,30 @@ export type ReferralSummary = {
   }>;
 };
 
+// Builds a shareable https link once the app has a domain configured. Set
+// HORIZON_APP_URL (e.g. "https://horizon.app") as a Supabase Edge Function
+// secret when that domain exists and is wired up for app/universal links
+// (assetlinks.json on Android, apple-app-site-association on iOS, plus
+// app_links initialized in main.dart - none of that is set up yet, this
+// just leaves the one place it needs to plug in). Until then this returns
+// null and the app falls back to sharing the short code by itself, which
+// already works everywhere (typed in by hand, texted, pasted).
+function getReferralLink(referralCode: string): string | null {
+  const base = Deno.env.get("HORIZON_APP_URL");
+  if (!base) return null;
+  return `${base.replace(/\/+$/, "")}/r/${referralCode}`;
+}
+
 // Everything the "My Referrals" screen needs in one call: the user's own
-// referral code (just their uid), who they've referred and how many of
-// each referred person's trades have paid out so far, the per-person cap,
-// and their all-time total earned.
+// short referral code (and a link built from it, once HORIZON_APP_URL is
+// set), who they've referred and how many of each referred person's trades
+// have paid out so far, the per-person cap, and their all-time total earned.
 export async function getReferralSummary(
   supabase: SupabaseClient,
   uid: string
 ): Promise<ReferralSummary> {
+  const referralCode = await ensureReferralCode(supabase, uid);
+
   const { data: settings, error: settingsError } = await supabase
     .from("platform_settings")
     .select("referral_max_payouts_per_referred_user")
@@ -149,7 +251,8 @@ export async function getReferralSummary(
   });
 
   return {
-    referralCode: uid,
+    referralCode,
+    referralLink: getReferralLink(referralCode),
     maxPayoutsPerReferredUser: settings.referral_max_payouts_per_referred_user,
     totalEarnedKobo,
     referrals,

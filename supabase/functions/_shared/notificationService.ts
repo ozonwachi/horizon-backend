@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
+import { sendPushToUser } from "./pushService.ts";
 
 const NOTIFICATIONS_TABLE = "notifications";
 
@@ -33,6 +34,27 @@ export async function notifyUser(
     read: false,
   });
   if (error) throw error;
+
+  // Every in-app notification (new message, escrow update, withdrawal
+  // status, referral payout, ...) also goes out as a real push notification
+  // this same way - one hook point instead of duplicating this at every
+  // call site. The in-app bell row above is the part that must succeed;
+  // push is a bonus on top of it, so a push failure (no registered device,
+  // FCM hiccup, etc.) is logged and swallowed here rather than failing the
+  // notification that triggered it.
+  try {
+    await sendPushToUser(supabase, userId, {
+      title: payload.title,
+      body: payload.body || "",
+      data: {
+        type: payload.type,
+        relatedType: payload.relatedType || "",
+        relatedId: payload.relatedId || "",
+      },
+    });
+  } catch (err) {
+    console.error(`Push notification failed for user ${userId}:`, err);
+  }
 }
 
 export async function notifyUsers(

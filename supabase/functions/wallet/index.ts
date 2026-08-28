@@ -1,7 +1,7 @@
 import { Hono } from "npm:hono@4";
 import { cors } from "npm:hono@4/cors";
 import { getAdminClient } from "../_shared/supabaseAdmin.ts";
-import { requireAuth, requireAdmin, type AppEnv } from "../_shared/auth.ts";
+import { requireAuth, requireAdmin, requireActiveAccount, type AppEnv } from "../_shared/auth.ts";
 import * as walletService from "../_shared/walletService.ts";
 
 // Ported from src/routes/wallet.js.
@@ -21,7 +21,7 @@ app.get("/balance", async (c) => {
   }
 });
 
-app.post("/deposits", async (c) => {
+app.post("/deposits", requireActiveAccount, async (c) => {
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   try {
@@ -37,7 +37,7 @@ app.post("/deposits", async (c) => {
   }
 });
 
-app.post("/deposits/verify", async (c) => {
+app.post("/deposits/verify", requireActiveAccount, async (c) => {
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   const reference = body?.reference;
@@ -52,7 +52,7 @@ app.post("/deposits/verify", async (c) => {
   }
 });
 
-app.post("/withdrawals", async (c) => {
+app.post("/withdrawals", requireActiveAccount, async (c) => {
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   try {
