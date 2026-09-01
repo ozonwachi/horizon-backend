@@ -30,6 +30,9 @@ export const TYPES = {
   WITHDRAWAL: "withdrawal", // payout request debiting the wallet
   WITHDRAWAL_REJECTED: "withdrawal_rejected", // rejected request crediting it back
   ADMIN_FORCE_CANCEL: "admin_force_cancel", // a force-cancel split decision
+  CONNECTION_FEE: "connection_fee", // a user self-declaring/paying a fee for a deal taken off-platform
+  ADMIN_CREDIT: "admin_credit", // an admin manually crediting a user's wallet
+  OFF_PLATFORM_REWARD: "off_platform_reward", // reward paid for a validated off-platform-deal report
 } as const;
 
 export type WalletTransaction = {

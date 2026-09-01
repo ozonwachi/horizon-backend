@@ -3,6 +3,7 @@ import * as paystackService from "./paystackService.ts";
 import { notifyUser, notifyUsers } from "./notificationService.ts";
 import { listAdminUids } from "./conversationService.ts";
 import { getAdminWalletUid, TYPES as LEDGER_TYPES, listWalletTransactions } from "./walletLedgerService.ts";
+import { recordAuditLog } from "./auditLogService.ts";
 
 const WALLETS_TABLE = "wallets";
 const WITHDRAWALS_TABLE = "withdrawal_requests";
@@ -68,6 +69,63 @@ export async function creditWallet(
   });
   if (error) throw error;
   return getBalance(supabase, uid);
+}
+
+// Requested feature: admin wallet credit - previously AdminWalletScreen was
+// entirely read-only (see its doc comment: "no 'add money' ... on purpose",
+// referring to the special admin commission-collection wallet). This is a
+// different thing: crediting an ORDINARY user's wallet directly, for cases
+// like a manual goodwill credit, a refund that didn't fit the normal escrow
+// refund path, or paying out an off-platform-deal report reward (see
+// offPlatformDealReportService.ts). Reuses creditWallet's existing
+// wallet_adjust RPC (the only path that's allowed to move a wallet balance
+// at all - RLS blocks a direct table write), just with an admin-specific
+// ledger type and an audit trail, since unlike a deposit or an escrow
+// payout this has no other transaction backing it.
+export async function adminCreditWallet(
+  supabase: SupabaseClient,
+  adminUid: string,
+  targetUid: string,
+  amountKobo: number,
+  reason: string,
+  // Lets a more specific caller (e.g. off-platform-deal reward payouts)
+  // tag the ledger row with its own type instead of the generic
+  // ADMIN_CREDIT, so it's distinguishable in the recipient's transaction
+  // history - defaults to the plain admin-credit case.
+  ledgerType: string = LEDGER_TYPES.ADMIN_CREDIT
+): Promise<number> {
+  if (!Number.isFinite(amountKobo) || amountKobo <= 0) {
+    throw new Error("amountKobo must be a positive number.");
+  }
+  const trimmedReason = (reason || "").trim();
+  if (!trimmedReason) {
+    throw new Error("A reason is required for an admin wallet credit.");
+  }
+
+  const newBalance = await creditWallet(supabase, targetUid, amountKobo, {
+    type: ledgerType,
+    reason: trimmedReason,
+  });
+
+  await recordAuditLog(supabase, {
+    userId: adminUid,
+    action: "wallet_admin_credit",
+    targetType: "userAccount",
+    targetId: targetUid,
+    newValue: { amountKobo, reason: trimmedReason },
+    reason: trimmedReason,
+  }).catch((err) => console.error("recordAuditLog (wallet_admin_credit) failed:", err));
+
+  await notifyUser(supabase, targetUid, {
+    type: "wallet_admin_credit",
+    title: "Your wallet was credited",
+    body: `An admin credited your wallet with ₦${(amountKobo / 100).toFixed(2)}: ${trimmedReason}`,
+    relatedType: "wallet",
+    relatedId: targetUid,
+    important: true,
+  }).catch((err) => console.error("notifyUser (wallet_admin_credit) failed:", err));
+
+  return newBalance;
 }
 
 export async function initiateDeposit(
@@ -183,12 +241,26 @@ export async function listAllWithdrawalsAdmin(supabase: SupabaseClient, limit = 
   return (data || []).map(toWithdrawalRequest);
 }
 
-export async function markWithdrawalPaid(supabase: SupabaseClient, requestId: string): Promise<WithdrawalRequest> {
+export async function markWithdrawalPaid(
+  supabase: SupabaseClient,
+  requestId: string,
+  adminUid: string
+): Promise<WithdrawalRequest> {
   const { data: row, error } = await supabase.rpc("wallet_mark_withdrawal_paid", {
     p_request_id: requestId,
   });
   if (error) throw new Error(error.message);
   const updated = toWithdrawalRequest(row);
+
+  // Security fix: this was previously a real money-moving admin action with
+  // no audit trail at all - every other admin override records one.
+  await recordAuditLog(supabase, {
+    userId: adminUid,
+    action: "withdrawal_marked_paid",
+    targetType: "withdrawal_request",
+    targetId: requestId,
+    newValue: { amountKobo: updated.amountKobo, uid: updated.uid },
+  }).catch((err) => console.error("recordAuditLog (withdrawal_marked_paid) failed:", err));
 
   await notifyUser(supabase, updated.uid, {
     type: "withdrawal_paid",
@@ -196,6 +268,7 @@ export async function markWithdrawalPaid(supabase: SupabaseClient, requestId: st
     body: `Your ₦${(updated.amountKobo / 100).toFixed(2)} withdrawal to ${updated.bankName} has been paid.`,
     relatedType: "withdrawal",
     relatedId: requestId,
+    important: true,
   }).catch((err) => console.error("notifyUser (withdrawal_paid) failed:", err));
 
   return updated;
@@ -204,7 +277,8 @@ export async function markWithdrawalPaid(supabase: SupabaseClient, requestId: st
 export async function rejectWithdrawal(
   supabase: SupabaseClient,
   requestId: string,
-  reason?: string | null
+  reason: string | null | undefined,
+  adminUid: string
 ): Promise<WithdrawalRequest> {
   const { data: row, error } = await supabase.rpc("wallet_reject_withdrawal", {
     p_request_id: requestId,
@@ -212,6 +286,15 @@ export async function rejectWithdrawal(
   });
   if (error) throw new Error(error.message);
   const updated = toWithdrawalRequest(row);
+
+  await recordAuditLog(supabase, {
+    userId: adminUid,
+    action: "withdrawal_rejected",
+    targetType: "withdrawal_request",
+    targetId: requestId,
+    newValue: { amountKobo: updated.amountKobo, uid: updated.uid },
+    reason: reason || null,
+  }).catch((err) => console.error("recordAuditLog (withdrawal_rejected) failed:", err));
 
   await notifyUser(supabase, updated.uid, {
     type: "withdrawal_rejected",
@@ -221,6 +304,7 @@ export async function rejectWithdrawal(
       : `Your ₦${(updated.amountKobo / 100).toFixed(2)} withdrawal was rejected. It's been credited back to your wallet.`,
     relatedType: "withdrawal",
     relatedId: requestId,
+    important: true,
   }).catch((err) => console.error("notifyUser (withdrawal_rejected) failed:", err));
 
   return updated;
@@ -238,4 +322,55 @@ export function getAdminWalletBalance(supabase: SupabaseClient) {
 
 export function listAdminWalletTransactions(supabase: SupabaseClient, limit?: number) {
   return listWalletTransactions(supabase, getAdminWalletUid(), limit);
+}
+
+// Self-serve "I took this deal off-platform, here's the connection fee"
+// payment - see pay_connection_fee() in
+// project_supabase_migration_17_connection_fee_and_contact_flags.sql for
+// the actual atomic debit+credit. Debits the caller, credits the admin
+// wallet, in one transaction; then lets admins know it happened (not
+// urgent, just visible - same treatment as a withdrawal request).
+export async function payConnectionFee(
+  supabase: SupabaseClient,
+  { uid, amountKobo, note }: { uid: string; amountKobo: number; note?: string | null }
+): Promise<{ balanceKobo: number }> {
+  if (!amountKobo || amountKobo <= 0) {
+    throw new Error("amountKobo must be greater than 0");
+  }
+
+  const { error } = await supabase.rpc("pay_connection_fee", {
+    p_uid: uid,
+    p_amount_kobo: amountKobo,
+    p_admin_wallet_uid: getAdminWalletUid(),
+    p_note: note || null,
+  });
+  if (error) throw new Error(error.message);
+
+  const balanceKobo = await getBalance(supabase, uid);
+
+  const adminUids = await listAdminUids(supabase).catch((err) => {
+    console.error("listAdminUids (connection fee) failed:", err);
+    return [] as string[];
+  });
+
+  // Requested: identify the payer in the notification itself, the same way
+  // requestWithdrawal() already interpolates accountName into its own
+  // admin notification - previously this said only "A user paid...", so an
+  // admin had to separately look the uid up in Profiles to know who paid.
+  const { data: payerProfile } = await supabase
+    .from("profiles")
+    .select("name, email")
+    .eq("uid", uid)
+    .maybeSingle();
+  const payerLabel = payerProfile?.name || payerProfile?.email || "A user";
+
+  await notifyUsers(supabase, adminUids, {
+    type: "connection_fee_paid",
+    title: "Connection fee paid",
+    body: `${payerLabel} paid a ₦${(amountKobo / 100).toFixed(2)} connection fee.${note ? ` Note: ${note}` : ""}`,
+    relatedType: "wallet",
+    relatedId: uid,
+  }).catch((err) => console.error("notifyUsers (connection_fee_paid) failed:", err));
+
+  return { balanceKobo };
 }

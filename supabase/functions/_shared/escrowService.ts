@@ -4,6 +4,7 @@ import { notifyAdminsOfDispute } from "./conversationService.ts";
 import { recordAuditLog } from "./auditLogService.ts";
 import { getAdminWalletUid } from "./walletLedgerService.ts";
 import { processReferralPayoutsForAgreement } from "./referralService.ts";
+import { markCommissionNegotiationUsed } from "./commissionNegotiationService.ts";
 
 const AGREEMENTS_TABLE = "escrow_agreements";
 const TRANCHES_TABLE = "escrow_tranches";
@@ -286,10 +287,57 @@ export async function createAgreement(
     title,
     description,
     tranches,
+    // Commission negotiation (migration_25): the id of a
+    // commission_negotiations row the SELLER has already accepted for this
+    // exact buyer/amount. Optional - every existing caller that never
+    // passes this keeps getting the plain standard-rate calculation below,
+    // completely unchanged.
+    negotiationId,
     // deno-lint-ignore no-explicit-any
   }: any
 ) {
-  const { commissionKobo, rule } = await calculateCommission(supabase, { type, category, amountKobo });
+  const { commissionKobo: standardCommissionKobo, rule } = await calculateCommission(supabase, {
+    type,
+    category,
+    amountKobo,
+  });
+
+  // Safety: an accepted negotiation is only ever applied as a CAP - the
+  // lesser of the negotiated rate and the standard rate - so a tampered or
+  // stale negotiationId can, at worst, get the caller the SAME commission
+  // they'd have paid anyway, never less than intended and never more.
+  // Every check below throws rather than silently falling back, since a
+  // negotiationId that fails validation means the client is trying to
+  // apply a deal that was never actually agreed to by both parties.
+  let commissionKobo = standardCommissionKobo;
+  let usedNegotiationId: string | null = null;
+  if (negotiationId) {
+    const { data: negotiation, error: negotiationError } = await supabase
+      .from("commission_negotiations")
+      .select("*")
+      .eq("id", negotiationId)
+      .maybeSingle();
+    if (negotiationError) throw negotiationError;
+    if (!negotiation) throw new Error("Negotiation not found.");
+    if (negotiation.status !== "accepted") {
+      throw new Error(`This commission proposal is "${negotiation.status}", not accepted.`);
+    }
+    if (negotiation.requester_uid !== buyerId || negotiation.counterparty_uid !== sellerId) {
+      throw new Error("This commission proposal doesn't match this buyer/seller pair.");
+    }
+    if (negotiation.amount_kobo !== amountKobo) {
+      throw new Error("This commission proposal was for a different deal amount.");
+    }
+
+    const negotiatedCommissionKobo =
+      negotiation.proposed_mode === "percentage"
+        ? Math.round((amountKobo * negotiation.proposed_value) / 100)
+        : negotiation.proposed_value;
+
+    commissionKobo = Math.min(standardCommissionKobo, negotiatedCommissionKobo);
+    usedNegotiationId = negotiation.id;
+  }
+
   const builtTranches = buildTranches({ amountKobo, tranches, terms });
 
   const { data: agreementId, error } = await supabase.rpc("escrow_create_agreement", {
@@ -306,6 +354,12 @@ export async function createAgreement(
     p_tranches: builtTranches,
   });
   if (error) throw new Error(error.message);
+
+  if (usedNegotiationId) {
+    await markCommissionNegotiationUsed(supabase, usedNegotiationId).catch((err) =>
+      console.error("markCommissionNegotiationUsed failed:", err)
+    );
+  }
 
   const agreement = await getAgreement(supabase, agreementId);
 
@@ -339,6 +393,7 @@ export async function markFunded(supabase: SupabaseClient, agreementId: string, 
     body: "The buyer has funded your escrow agreement.",
     relatedType: "escrow",
     relatedId: agreementId,
+    important: true,
   }).catch((err) => console.error("notifyUser (escrow_funded) failed:", err));
 
   return result;
@@ -361,6 +416,7 @@ export async function markReleased(supabase: SupabaseClient, agreementId: string
     body: "The buyer released the escrow funds to you.",
     relatedType: "escrow",
     relatedId: agreementId,
+    important: true,
   }).catch((err) => console.error("notifyUser (escrow_released) failed:", err));
 
   return result;
@@ -397,6 +453,7 @@ export async function confirmTrancheRelease(
       body: "The buyer released a tranche of escrow funds to you.",
       relatedType: "escrow",
       relatedId: agreementId,
+      important: true,
     }).catch((err) => console.error("notifyUser (tranche release) failed:", err));
   }
 
@@ -476,6 +533,7 @@ export async function disputeTranche(
       body: reason ? `A tranche was disputed: ${reason}` : "A tranche on your escrow agreement was disputed.",
       relatedType: "escrow",
       relatedId: agreementId,
+      important: true,
     }).catch((err) => console.error("notifyUser (escrow_disputed) failed:", err));
   }
 
@@ -552,6 +610,7 @@ export async function adminResolveTranche(
             : "An admin resolved the dispute and released the tranche to the seller.",
         relatedType: "escrow",
         relatedId: agreementId,
+        important: true,
       }).catch((err) => console.error("notifyUser (dispute resolved) failed:", err))
     )
   );
@@ -670,6 +729,7 @@ export async function markDisputed(
       body: reason ? `Your escrow agreement was disputed: ${reason}` : "Your escrow agreement was disputed.",
       relatedType: "escrow",
       relatedId: agreementId,
+      important: true,
     }).catch((err) => console.error("notifyUser (escrow_disputed) failed:", err));
   }
 
@@ -695,6 +755,7 @@ export async function payFromWallet(supabase: SupabaseClient, agreementId: strin
     body: "The buyer funded your escrow agreement from their wallet.",
     relatedType: "escrow",
     relatedId: agreementId,
+    important: true,
   }).catch((err) => console.error("notifyUser (escrow_funded) failed:", err));
 
   return result;
@@ -843,6 +904,7 @@ export async function adminUpdateAgreement(
           body: `An admin updated this agreement: ${reason}`,
           relatedType: "escrow",
           relatedId: agreementId,
+          important: true,
         }).catch((err) => console.error("notifyUser (escrow_admin_update) failed:", err))
       )
   );
@@ -1077,6 +1139,7 @@ export async function adminForceCancelDeal(
           body: `An admin ended this deal: ${reason}`,
           relatedType: "escrow",
           relatedId: agreementId,
+          important: true,
         }).catch((err) => console.error("notifyUser (force cancelled) failed:", err))
       )
   );

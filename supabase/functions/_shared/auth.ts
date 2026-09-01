@@ -6,7 +6,36 @@ export type AuthedUser = {
   email: string | null;
   isAdmin: boolean;
   accountStatus: string;
+  // Security: admin 2FA (Supabase native TOTP MFA). `aal` is this
+  // session's current Authenticator Assurance Level, read straight off the
+  // JWT (Supabase mints "aal1" for a plain password sign-in, "aal2" once
+  // an MFA challenge has also been completed) - getUser() itself doesn't
+  // surface this, so requireAuth decodes it directly (safe: the token was
+  // already cryptographically validated by the getUser() call above this).
+  // `hasVerifiedMfaFactor` is whether this account has AT LEAST ONE
+  // verified TOTP factor enrolled at all - see requireAdmin's doc comment
+  // for why both are needed together.
+  aal: string;
+  hasVerifiedMfaFactor: boolean;
 };
+
+// Decodes (WITHOUT verifying - the token was already verified by the
+// supabase.auth.getUser() call this is only ever used alongside) a JWT's
+// payload to read the `aal` claim. Returns "aal1" if anything about the
+// token looks unexpected, which is the conservative default (never
+// silently grants aal2).
+function decodeAalFromJwt(token: string): string {
+  try {
+    const payloadB64 = token.split(".")[1];
+    if (!payloadB64) return "aal1";
+    const normalized = payloadB64.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), "=");
+    const payload = JSON.parse(atob(padded));
+    return typeof payload?.aal === "string" ? payload.aal : "aal1";
+  } catch {
+    return "aal1";
+  }
+}
 
 // Kept in sync with moderationService.ts's LOGIN_BLOCKING_STATUSES -
 // 'investigating' is deliberately excluded here (that one only blocks
@@ -70,11 +99,15 @@ export async function requireAuth(c: AppContext, next: Next) {
       );
     }
 
+    const hasVerifiedMfaFactor = (data.user.factors || []).some((f) => f.status === "verified");
+
     const user: AuthedUser = {
       uid,
       email: data.user.email ?? null,
       isAdmin: profile?.is_admin === true,
       accountStatus,
+      aal: decodeAalFromJwt(token),
+      hasVerifiedMfaFactor,
     };
     c.set("user", user);
     await next();
@@ -85,10 +118,30 @@ export async function requireAuth(c: AppContext, next: Next) {
 }
 
 // Must run after requireAuth (needs the user context var it sets).
+//
+// Security fix: admin 2FA. Once an admin account has enrolled a verified
+// TOTP factor, every admin route requires the session to actually be at
+// AAL2 (i.e. the MFA challenge was completed, not just password sign-in) -
+// closes the gap where enrolling MFA in the app was purely cosmetic and a
+// stolen password alone still fully worked. Deliberately opt-in rather
+// than mandatory for every admin: an admin who hasn't enrolled a factor
+// yet can still use their account (the Flutter app should nag them to set
+// one up, not lock them out for not having one - see
+// AdminMfaSetupScreen). MFA_REQUIRED is a distinct error code so the
+// client can tell "you're not an admin" apart from "step up to aal2".
 export async function requireAdmin(c: AppContext, next: Next) {
   const user = c.get("user");
   if (!user?.isAdmin) {
     return c.json({ error: "Admin access required" }, 403);
+  }
+  if (user.hasVerifiedMfaFactor && user.aal !== "aal2") {
+    return c.json(
+      {
+        error: "This admin account requires 2FA verification for this session.",
+        code: "MFA_REQUIRED",
+      },
+      401
+    );
   }
   await next();
 }

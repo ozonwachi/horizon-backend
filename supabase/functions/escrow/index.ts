@@ -6,6 +6,7 @@ import * as escrowService from "../_shared/escrowService.ts";
 import * as paystackService from "../_shared/paystackService.ts";
 import { listAuditLogs } from "../_shared/auditLogService.ts";
 import { getEscrowConversation, notifyAdminsOfSupportMessage } from "../_shared/conversationService.ts";
+import { rateLimitOrRespond } from "../_shared/rateLimitService.ts";
 
 // Ported from src/routes/escrow.js. Unlike every other function in this
 // project, requireAuth is applied per-route rather than via a blanket
@@ -44,11 +45,30 @@ app.post("/internal/flag-overdue-tranches", async (c) => {
 app.post("/agreements", requireAuth, requireActiveAccount, async (c) => {
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
-  const { sellerId, type, category, amountKobo, terms, referenceId, title, description, tranches } = body || {};
+  const {
+    sellerId,
+    type,
+    category,
+    amountKobo,
+    terms,
+    referenceId,
+    title,
+    description,
+    tranches,
+    negotiationId,
+  } = body || {};
 
   if (!sellerId || !type || !amountKobo) {
     return c.json({ error: "sellerId, type, and amountKobo are required" }, 400);
   }
+
+  const limited = await rateLimitOrRespond(
+    getAdminClient(),
+    `escrow-create:${user.uid}`,
+    { max: 30, windowSeconds: 3600 },
+    c
+  );
+  if (limited) return limited;
 
   try {
     const agreement = await escrowService.createAgreement(getAdminClient(), {
@@ -62,6 +82,7 @@ app.post("/agreements", requireAuth, requireActiveAccount, async (c) => {
       title,
       description,
       tranches,
+      negotiationId,
     });
     return c.json(agreement, 201);
   } catch (err) {

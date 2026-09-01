@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
+import { recordAuditLog } from "./auditLogService.ts";
 
 const REPORTS_TABLE = "reports";
 
@@ -66,6 +67,7 @@ const TARGET_TABLES: Record<string, string> = {
 /// that would otherwise stop anyone but the poster from deleting it.
 export async function deleteReportedPost(
   supabase: SupabaseClient,
+  adminUid: string,
   targetType: string,
   targetId: string
 ): Promise<void> {
@@ -73,6 +75,16 @@ export async function deleteReportedPost(
   if (!table) throw new Error(`Unknown report target type "${targetType}"`);
   const { error } = await supabase.from(table).delete().eq("id", targetId);
   if (error) throw error;
+
+  // Security fix: this is a destructive service-role delete of a user's
+  // post (bypassing their own "owners manage their own listings" RLS) that
+  // previously left no record of which admin did it or why.
+  await recordAuditLog(supabase, {
+    userId: adminUid,
+    action: "reported_post_deleted",
+    targetType,
+    targetId,
+  }).catch((err) => console.error("recordAuditLog (reported_post_deleted) failed:", err));
 }
 
 export async function updateReportStatus(
@@ -91,5 +103,14 @@ export async function updateReportStatus(
     .select()
     .single();
   if (error) throw error;
+
+  await recordAuditLog(supabase, {
+    userId: adminUid,
+    action: "report_status_updated",
+    targetType: "report",
+    targetId: id,
+    newValue: { status },
+  }).catch((err) => console.error("recordAuditLog (report_status_updated) failed:", err));
+
   return toReport(data);
 }

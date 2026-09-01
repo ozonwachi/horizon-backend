@@ -11,6 +11,8 @@ export type PlatformSettings = {
   referralCommissionType: string;
   referralCommissionValue: number;
   referralMaxPayoutsPerReferredUser: number;
+  connectionFeeType: string;
+  connectionFeeValue: number;
   updatedAt: string | null;
   updatedBy: string | null;
 };
@@ -43,6 +45,8 @@ function toSettings(row: any): PlatformSettings {
     referralCommissionType: row.referral_commission_type,
     referralCommissionValue: row.referral_commission_value,
     referralMaxPayoutsPerReferredUser: row.referral_max_payouts_per_referred_user,
+    connectionFeeType: row.connection_fee_type,
+    connectionFeeValue: row.connection_fee_value,
     updatedAt: row.updated_at,
     updatedBy: row.updated_by,
   };
@@ -99,6 +103,8 @@ export type SettingsChanges = {
   referralCommissionType?: string;
   referralCommissionValue?: number;
   referralMaxPayoutsPerReferredUser?: number;
+  connectionFeeType?: string;
+  connectionFeeValue?: number;
   reason?: string | null;
 };
 
@@ -122,6 +128,8 @@ export async function updateSettings(
     patch.referral_commission_value = changes.referralCommissionValue;
   if (changes.referralMaxPayoutsPerReferredUser !== undefined)
     patch.referral_max_payouts_per_referred_user = changes.referralMaxPayoutsPerReferredUser;
+  if (changes.connectionFeeType !== undefined) patch.connection_fee_type = changes.connectionFeeType;
+  if (changes.connectionFeeValue !== undefined) patch.connection_fee_value = changes.connectionFeeValue;
 
   const { data, error } = await supabase
     .from(SETTINGS_TABLE)

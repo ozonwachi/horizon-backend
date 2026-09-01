@@ -15,10 +15,22 @@ verify_jwt = false
 [functions.referrals]
 verify_jwt = false
 
+[functions.jobs]
+verify_jwt = false
+
 [functions.admin]
 verify_jwt = false
 
 [functions.webhooks]
+verify_jwt = false
+
+[functions.barter]
+verify_jwt = false
+
+[functions.negotiations]
+verify_jwt = false
+
+[functions.account]
 verify_jwt = false
 
 # share needs this for a different reason than the rest: its pages are
