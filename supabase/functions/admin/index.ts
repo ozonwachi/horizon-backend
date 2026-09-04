@@ -36,6 +36,9 @@ import {
   updateOffPlatformDealReportStatus,
   payOffPlatformDealReportReward,
 } from "../_shared/offPlatformDealReportService.ts";
+import { listAllFaqs, createFaq, updateFaq, deleteFaq } from "../_shared/faqService.ts";
+import { listContactMessages, replyToContactMessage } from "../_shared/contactAdminService.ts";
+import { runPushDiagnostics } from "../_shared/pushService.ts";
 import { rateLimitOrRespond } from "../_shared/rateLimitService.ts";
 
 // Ported from src/routes/adminSettings.js. Every route here is admin-only.
@@ -541,6 +544,95 @@ app.post("/off-platform-deal-reports/:id/reward", async (c) => {
   } catch (err) {
     console.error("Pay off-platform deal report reward failed:", err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+// Admin-editable FAQ (migration_28) - HelpCenterScreen reads faqs directly
+// via RLS (public select policy), this is just the management CRUD.
+app.get("/faqs", async (c) => {
+  try {
+    const faqs = await listAllFaqs(getAdminClient());
+    return c.json({ faqs });
+  } catch (err) {
+    console.error("List faqs failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.post("/faqs", async (c) => {
+  const admin = c.get("user");
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    const faq = await createFaq(getAdminClient(), admin.uid, body || {});
+    return c.json(faq, 201);
+  } catch (err) {
+    console.error("Create faq failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.patch("/faqs/:id", async (c) => {
+  const admin = c.get("user");
+  const id = c.req.param("id");
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    const faq = await updateFaq(getAdminClient(), admin.uid, id, body || {});
+    return c.json(faq);
+  } catch (err) {
+    console.error("Update faq failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.delete("/faqs/:id", async (c) => {
+  const admin = c.get("user");
+  const id = c.req.param("id");
+  try {
+    await deleteFaq(getAdminClient(), admin.uid, id);
+    return c.json({ ok: true });
+  } catch (err) {
+    console.error("Delete faq failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+// "Contact Admin" on the Help Center screen (migration_31) - filing goes
+// through the `account` Edge Function (self-service), this is the
+// admin-side review/reply half. See contactAdminService.ts.
+app.get("/contact-messages", async (c) => {
+  try {
+    const messages = await listContactMessages(getAdminClient());
+    return c.json({ messages });
+  } catch (err) {
+    console.error("List contact messages failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.post("/contact-messages/:id/reply", async (c) => {
+  const admin = c.get("user");
+  const id = c.req.param("id");
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    const message = await replyToContactMessage(getAdminClient(), admin.uid, id, body?.reply);
+    return c.json(message);
+  } catch (err) {
+    console.error("Reply to contact message failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+// "Push isn't working, don't know if I'm doing something wrong" - see
+// runPushDiagnostics's doc comment. Self-targeted (always the calling
+// admin's own uid/devices), so any admin can check their own phone.
+app.post("/push-diagnostics/test", async (c) => {
+  const admin = c.get("user");
+  try {
+    const result = await runPushDiagnostics(getAdminClient(), admin.uid);
+    return c.json(result);
+  } catch (err) {
+    console.error("Push diagnostics failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
 });
 

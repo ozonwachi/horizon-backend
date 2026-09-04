@@ -27,9 +27,6 @@ verify_jwt = false
 [functions.barter]
 verify_jwt = false
 
-[functions.negotiations]
-verify_jwt = false
-
 [functions.account]
 verify_jwt = false
 

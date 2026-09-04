@@ -14,7 +14,7 @@ import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 // Accounts -> Generate new private key, then:
 //   supabase secrets set FIREBASE_SERVICE_ACCOUNT='<the whole JSON, one line>'
 
-type ServiceAccount = {
+export type ServiceAccount = {
   project_id: string;
   client_email: string;
   private_key: string;
@@ -22,7 +22,7 @@ type ServiceAccount = {
 
 let cachedServiceAccount: ServiceAccount | null = null;
 
-function getServiceAccount(): ServiceAccount {
+export function getServiceAccount(): ServiceAccount {
   if (cachedServiceAccount) return cachedServiceAccount;
   const raw = Deno.env.get("FIREBASE_SERVICE_ACCOUNT");
   if (!raw) {
@@ -70,7 +70,7 @@ async function importPrivateKey(pem: string): Promise<CryptoKey> {
 // on every single push.
 let cachedToken: { value: string; expiresAt: number } | null = null;
 
-async function getAccessToken(): Promise<string> {
+export async function getAccessToken(): Promise<string> {
   if (cachedToken && cachedToken.expiresAt > Date.now() + 60_000) {
     return cachedToken.value;
   }
@@ -180,4 +180,90 @@ export async function sendPushToUser(
       }
     })
   );
+}
+
+export type PushDiagnostics = {
+  serviceAccountConfigured: boolean;
+  serviceAccountError: string | null;
+  deviceTokenCount: number;
+  sendResults: Array<{ tokenPreview: string; ok: boolean; error?: string }>;
+};
+
+/// Self-test for "push isn't working, don't know if I'm doing something
+/// wrong" - most of what can go wrong here (FIREBASE_SERVICE_ACCOUNT secret
+/// never set, no device registered, a stale/uninstalled-app token) is
+/// otherwise invisible: sendPushToUser deliberately swallows every failure
+/// so a push hiccup never breaks the in-app notification that triggered
+/// it, which means nothing in the app itself ever tells you push is
+/// broken. This runs the exact same steps against the CALLING admin's own
+/// account and actually reports each one, instead of only logging to the
+/// Edge Function console. Always self-targeted (uses the admin's own uid,
+/// same reasoning as /account/mfa/clear-unverified) - this is a "test my
+/// own phone" tool, not a way to probe another user's device state.
+export async function runPushDiagnostics(supabase: SupabaseClient, uid: string): Promise<PushDiagnostics> {
+  let serviceAccountConfigured = true;
+  let serviceAccountError: string | null = null;
+  let serviceAccount: ServiceAccount | null = null;
+  let accessToken: string | null = null;
+
+  try {
+    serviceAccount = getServiceAccount();
+    accessToken = await getAccessToken();
+  } catch (err) {
+    serviceAccountConfigured = false;
+    serviceAccountError = err instanceof Error ? err.message : String(err);
+  }
+
+  const { data: tokens, error } = await supabase.from("device_tokens").select("token").eq("uid", uid);
+  if (error) throw error;
+  const deviceTokenCount = tokens?.length ?? 0;
+
+  const sendResults: PushDiagnostics["sendResults"] = [];
+
+  if (accessToken && serviceAccount && tokens && tokens.length > 0) {
+    for (const { token } of tokens as Array<{ token: string }>) {
+      const tokenPreview = `${token.slice(0, 12)}...`;
+      try {
+        const res = await fetch(
+          `https://fcm.googleapis.com/v1/projects/${serviceAccount.project_id}/messages:send`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              message: {
+                token,
+                notification: {
+                  title: "Test push",
+                  body: "If you see this, push notifications are working on this device.",
+                },
+                android: { priority: "high" },
+              },
+            }),
+          }
+        );
+        if (res.ok) {
+          sendResults.push({ tokenPreview, ok: true });
+        } else {
+          // deno-lint-ignore no-explicit-any
+          const body: any = await res.json().catch(() => ({}));
+          sendResults.push({
+            tokenPreview,
+            ok: false,
+            error: body?.error?.message || body?.error?.status || `HTTP ${res.status}`,
+          });
+        }
+      } catch (err) {
+        sendResults.push({
+          tokenPreview,
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  return { serviceAccountConfigured, serviceAccountError, deviceTokenCount, sendResults };
 }

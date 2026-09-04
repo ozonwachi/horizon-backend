@@ -12,12 +12,15 @@ import { notifyUser, notifyUsers } from "../_shared/notificationService.ts";
 // right after a successful post, fans out to whoever the
 // match_job_notification_candidates() SQL function (see
 // project_supabase_migration_13_job_alerts_and_user_reports.sql, wildcard
-// refinement in migration_14) says is a match - someone who listed a
-// role/skill (e.g. "Plumber") that shows up in this job's title or
-// category (or who's tagged the generalist "Job Seeker", which matches
-// everything), within their own notification radius of their own
-// notification location (not live GPS - see migration_13's comment for
-// why this has to be a location the user set ahead of time).
+// refinement in migration_14, tag-to-tag matching in migration_32) says is
+// a match - someone who listed a role/skill (e.g. "Plumber") that this
+// job was also tagged with under "Skills needed" (case/whitespace
+// -insensitively - or, for an older/untagged job, whose title/category
+// text happens to contain the word instead), or who's tagged the
+// generalist "Job Seeker" (which matches everything), within their own
+// notification radius of their own notification location (not live GPS -
+// see migration_13's comment for why this has to be a location the user
+// set ahead of time).
 //
 // Direction only runs one way: jobs.is_service_offer distinguishes a
 // CLIENT looking for a skillsman (false) from a SKILLSMAN advertising
@@ -40,7 +43,7 @@ app.post("/:id/notify-matches", async (c) => {
     const { data: job, error } = await supabase
       .from("jobs")
       .select(
-        "id, poster_id, title, category, latitude, longitude, location_label, is_service_offer, state"
+        "id, poster_id, title, category, latitude, longitude, location_label, is_service_offer, state, skill_tags"
       )
       .eq("id", jobId)
       .maybeSingle();
@@ -90,6 +93,13 @@ app.post("/:id/notify-matches", async (c) => {
         // one) - see migration_23.
         p_state: job.state ?? null,
         p_radius_km: NOTIFY_RADIUS_KM,
+        // Bug fix: this used to be the whole story was "does the trade word
+        // literally appear in the title/category text" - a "Plumber" tag
+        // never matched unless a poster's title happened to contain that
+        // word, which looked like a random/capitalization bug from the
+        // outside. Now matched tag-to-tag against the job's own "Skills
+        // needed" tags (case/whitespace-insensitively) - see migration_32.
+        p_skill_tags: job.skill_tags ?? [],
       }
     );
     if (matchError) throw matchError;

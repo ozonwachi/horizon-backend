@@ -33,6 +33,7 @@ export const TYPES = {
   CONNECTION_FEE: "connection_fee", // a user self-declaring/paying a fee for a deal taken off-platform
   ADMIN_CREDIT: "admin_credit", // an admin manually crediting a user's wallet
   OFF_PLATFORM_REWARD: "off_platform_reward", // reward paid for a validated off-platform-deal report
+  COMMISSION_REFUND: "commission_refund", // admin refund after reviewing a commission concern
 } as const;
 
 export type WalletTransaction = {

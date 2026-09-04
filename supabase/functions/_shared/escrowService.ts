@@ -4,7 +4,6 @@ import { notifyAdminsOfDispute } from "./conversationService.ts";
 import { recordAuditLog } from "./auditLogService.ts";
 import { getAdminWalletUid } from "./walletLedgerService.ts";
 import { processReferralPayoutsForAgreement } from "./referralService.ts";
-import { markCommissionNegotiationUsed } from "./commissionNegotiationService.ts";
 
 const AGREEMENTS_TABLE = "escrow_agreements";
 const TRANCHES_TABLE = "escrow_tranches";
@@ -157,10 +156,38 @@ export async function calculateCommission(
   // priority over the flat commission_rules override whenever any exist
   // for this (type, category) - falls through to the code below completely
   // unchanged when no tiers are configured, so this is backward compatible.
-  let tierQuery = supabase.from(TIERS_TABLE).select("*").eq("type", type);
-  tierQuery = category ? tierQuery.eq("category", category) : tierQuery.is("category", null);
-  const { data: tierRows, error: tierError } = await tierQuery.order("min_amount_kobo", { ascending: true });
-  if (tierError) throw tierError;
+  //
+  // Bug fix: this used to be a single query with `.eq("category", category)`
+  // when the deal had a category, which never matches a tier row where
+  // category IS NULL - so a "wildcard" tier (admin left category blank,
+  // documented as "applies to every category of this type") silently
+  // matched nothing for any real deal, always falling through to the flat
+  // default below. Fixed by checking an exact-category tier first, then
+  // falling back to a wildcard (null-category) tier for the type - so a
+  // specific-category tier still wins when both exist, but a wildcard one
+  // actually applies when it's the only tier configured.
+  // deno-lint-ignore no-explicit-any
+  let tierRows: any[] | null = null;
+  if (category) {
+    const { data, error: tierError } = await supabase
+      .from(TIERS_TABLE)
+      .select("*")
+      .eq("type", type)
+      .eq("category", category)
+      .order("min_amount_kobo", { ascending: true });
+    if (tierError) throw tierError;
+    tierRows = data;
+  }
+  if (!tierRows || tierRows.length === 0) {
+    const { data, error: tierError } = await supabase
+      .from(TIERS_TABLE)
+      .select("*")
+      .eq("type", type)
+      .is("category", null)
+      .order("min_amount_kobo", { ascending: true });
+    if (tierError) throw tierError;
+    tierRows = data;
+  }
 
   if (tierRows && tierRows.length > 0) {
     // Exact match: amountKobo actually falls inside this tier's range.
@@ -186,7 +213,20 @@ export async function calculateCommission(
         ? Math.round((amountKobo * selectedTier.value) / 100)
         : selectedTier.value;
 
-    return { commissionKobo, rule: selectedTier };
+    // Bug fix: this used to return the TIER row as `rule`, and the caller
+    // stores `rule.id` in escrow_agreements.commission_rule_id - a column
+    // whose foreign key points at commission_rules(id), a completely
+    // separate table/id-space from commission_tiers(id). Every deal priced
+    // by a tier was therefore inserting a commission_tiers id into a
+    // commission_rules FK, which fails (violates the FK constraint) unless
+    // that same uuid happens to also exist as a commission_rules row - i.e.
+    // it always fails once a tier is actually selected. `rule` is `null`
+    // here on purpose so the caller passes NULL for commission_rule_id
+    // instead; `tierId` carries the tier that was actually applied for
+    // anything that wants it (nothing persists it today - there's no
+    // commission_tier_id column - but the value is still surfaced rather
+    // than silently dropped).
+    return { commissionKobo, rule: null as null, tierId: selectedTier.id as string | null };
   }
 
   let query = supabase.from(COMMISSION_TABLE).select("*").eq("type", type).limit(1);
@@ -212,7 +252,7 @@ export async function calculateCommission(
         ? Math.round((amountKobo * settings.admin_commission_value) / 100)
         : settings.admin_commission_value;
 
-    return { commissionKobo, rule: null as null };
+    return { commissionKobo, rule: null as null, tierId: null as string | null };
   }
 
   const rule = rows[0];
@@ -225,7 +265,8 @@ export async function calculateCommission(
   if (rule.min_kobo != null) commissionKobo = Math.max(commissionKobo, rule.min_kobo);
   if (rule.max_kobo != null) commissionKobo = Math.min(commissionKobo, rule.max_kobo);
 
-  return { commissionKobo, rule };
+  // deno-lint-ignore no-explicit-any
+  return { commissionKobo, rule: rule as any, tierId: null as string | null };
 }
 
 // Builds the tranches array for a new agreement. If the caller passes
@@ -287,56 +328,19 @@ export async function createAgreement(
     title,
     description,
     tranches,
-    // Commission negotiation (migration_25): the id of a
-    // commission_negotiations row the SELLER has already accepted for this
-    // exact buyer/amount. Optional - every existing caller that never
-    // passes this keeps getting the plain standard-rate calculation below,
-    // completely unchanged.
-    negotiationId,
     // deno-lint-ignore no-explicit-any
   }: any
 ) {
-  const { commissionKobo: standardCommissionKobo, rule } = await calculateCommission(supabase, {
+  // Commission negotiation used to let a buyer/seller pair pre-agree a
+  // capped rate before creating the agreement (migration_25), then briefly
+  // a "commission concern" flag-after-the-fact flow (migration_28) - both
+  // removed (migration_30). A deal just always charges the plain
+  // standard/tiered rate computed here, no exceptions.
+  const { commissionKobo, rule } = await calculateCommission(supabase, {
     type,
     category,
     amountKobo,
   });
-
-  // Safety: an accepted negotiation is only ever applied as a CAP - the
-  // lesser of the negotiated rate and the standard rate - so a tampered or
-  // stale negotiationId can, at worst, get the caller the SAME commission
-  // they'd have paid anyway, never less than intended and never more.
-  // Every check below throws rather than silently falling back, since a
-  // negotiationId that fails validation means the client is trying to
-  // apply a deal that was never actually agreed to by both parties.
-  let commissionKobo = standardCommissionKobo;
-  let usedNegotiationId: string | null = null;
-  if (negotiationId) {
-    const { data: negotiation, error: negotiationError } = await supabase
-      .from("commission_negotiations")
-      .select("*")
-      .eq("id", negotiationId)
-      .maybeSingle();
-    if (negotiationError) throw negotiationError;
-    if (!negotiation) throw new Error("Negotiation not found.");
-    if (negotiation.status !== "accepted") {
-      throw new Error(`This commission proposal is "${negotiation.status}", not accepted.`);
-    }
-    if (negotiation.requester_uid !== buyerId || negotiation.counterparty_uid !== sellerId) {
-      throw new Error("This commission proposal doesn't match this buyer/seller pair.");
-    }
-    if (negotiation.amount_kobo !== amountKobo) {
-      throw new Error("This commission proposal was for a different deal amount.");
-    }
-
-    const negotiatedCommissionKobo =
-      negotiation.proposed_mode === "percentage"
-        ? Math.round((amountKobo * negotiation.proposed_value) / 100)
-        : negotiation.proposed_value;
-
-    commissionKobo = Math.min(standardCommissionKobo, negotiatedCommissionKobo);
-    usedNegotiationId = negotiation.id;
-  }
 
   const builtTranches = buildTranches({ amountKobo, tranches, terms });
 
@@ -354,12 +358,6 @@ export async function createAgreement(
     p_tranches: builtTranches,
   });
   if (error) throw new Error(error.message);
-
-  if (usedNegotiationId) {
-    await markCommissionNegotiationUsed(supabase, usedNegotiationId).catch((err) =>
-      console.error("markCommissionNegotiationUsed failed:", err)
-    );
-  }
 
   const agreement = await getAgreement(supabase, agreementId);
 
