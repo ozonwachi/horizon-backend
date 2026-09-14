@@ -148,6 +148,71 @@ export async function getAgreement(supabase: SupabaseClient, agreementId: string
   return toAgreement(row, trancheRows || []);
 }
 
+// ---------------------------------------------------------------------------
+// Pure commission math, pulled out of calculateCommission below so it can be
+// unit tested (see escrowCommission.test.ts) without a live Supabase client
+// or database - every one of these takes plain data in and returns plain
+// data out, no I/O. calculateCommission itself stays responsible for all
+// the querying/fallback-tier-vs-rule-vs-settings orchestration; these three
+// are just the arithmetic at the bottom of each branch.
+
+// deno-lint-ignore no-explicit-any
+export type TierRow = any;
+// deno-lint-ignore no-explicit-any
+export type CommissionRuleRow = any;
+
+/// Picks which tier row applies to [amountKobo] out of [tierRows] (already
+/// filtered to one (type, category) and sorted by min_amount_kobo
+/// ascending by the caller - see calculateCommission). Exact match: the
+/// amount actually falls inside a tier's [min_amount_kobo, max_amount_kobo]
+/// range. No exact match - extend to the nearest tier rather than falling
+/// back to the platform default, per product decision: below the lowest
+/// tier's minimum, use the lowest tier; above the highest tier's maximum
+/// (or landing in a gap between non-contiguous tiers), use the highest
+/// tier whose minimum the amount has already passed. Returns null only if
+/// [tierRows] is empty.
+export function selectTierForAmount(tierRows: TierRow[], amountKobo: number): TierRow | null {
+  if (!tierRows || tierRows.length === 0) return null;
+
+  const exact = tierRows.find(
+    (t) => amountKobo >= t.min_amount_kobo && (t.max_amount_kobo == null || amountKobo <= t.max_amount_kobo)
+  );
+  if (exact) return exact;
+
+  if (amountKobo < tierRows[0].min_amount_kobo) {
+    return tierRows[0];
+  }
+  return [...tierRows].reverse().find((t) => amountKobo >= t.min_amount_kobo) ?? tierRows[tierRows.length - 1];
+}
+
+/// Percentage/flat commission for a selected tier row - tiers have no
+/// min/max clamp (unlike commission_rules below), only the range used to
+/// select which tier applies in the first place.
+export function commissionFromTier(tier: TierRow, amountKobo: number): number {
+  return tier.mode === "percentage" ? Math.round((amountKobo * tier.value) / 100) : tier.value;
+}
+
+/// Percentage/flat commission for a commission_rules row, clamped to
+/// [min_kobo, max_kobo] when either is set.
+export function commissionFromRule(rule: CommissionRuleRow, amountKobo: number): number {
+  let commissionKobo = rule.mode === "percentage" ? Math.round((amountKobo * rule.value) / 100) : rule.value;
+  if (rule.min_kobo != null) commissionKobo = Math.max(commissionKobo, rule.min_kobo);
+  if (rule.max_kobo != null) commissionKobo = Math.min(commissionKobo, rule.max_kobo);
+  return commissionKobo;
+}
+
+/// Percentage/flat commission from the platform-wide default
+/// (platform_settings) - the floor every deal lands on when no
+/// commission_rules row or tier applies.
+export function commissionFromSettings(
+  settings: { admin_commission_type: string; admin_commission_value: number },
+  amountKobo: number
+): number {
+  return settings.admin_commission_type === "percentage"
+    ? Math.round((amountKobo * settings.admin_commission_value) / 100)
+    : settings.admin_commission_value;
+}
+
 export async function calculateCommission(
   supabase: SupabaseClient,
   { type, category, amountKobo }: { type: string; category?: string | null; amountKobo: number }
@@ -166,8 +231,7 @@ export async function calculateCommission(
   // falling back to a wildcard (null-category) tier for the type - so a
   // specific-category tier still wins when both exist, but a wildcard one
   // actually applies when it's the only tier configured.
-  // deno-lint-ignore no-explicit-any
-  let tierRows: any[] | null = null;
+  let tierRows: TierRow[] | null = null;
   if (category) {
     const { data, error: tierError } = await supabase
       .from(TIERS_TABLE)
@@ -190,28 +254,8 @@ export async function calculateCommission(
   }
 
   if (tierRows && tierRows.length > 0) {
-    // Exact match: amountKobo actually falls inside this tier's range.
-    let selectedTier = tierRows.find(
-      (t) => amountKobo >= t.min_amount_kobo && (t.max_amount_kobo == null || amountKobo <= t.max_amount_kobo)
-    );
-    // No exact match - extend to the nearest tier rather than falling back
-    // to the platform default, per product decision: below the lowest
-    // tier's minimum, use the lowest tier; above the highest tier's
-    // maximum (or landing in a gap between non-contiguous tiers), use the
-    // highest tier whose minimum the amount has already passed.
-    if (!selectedTier) {
-      if (amountKobo < tierRows[0].min_amount_kobo) {
-        selectedTier = tierRows[0];
-      } else {
-        selectedTier =
-          [...tierRows].reverse().find((t) => amountKobo >= t.min_amount_kobo) ?? tierRows[tierRows.length - 1];
-      }
-    }
-
-    const commissionKobo =
-      selectedTier.mode === "percentage"
-        ? Math.round((amountKobo * selectedTier.value) / 100)
-        : selectedTier.value;
+    const selectedTier = selectTierForAmount(tierRows, amountKobo)!;
+    const commissionKobo = commissionFromTier(selectedTier, amountKobo);
 
     // Bug fix: this used to return the TIER row as `rule`, and the caller
     // stores `rule.id` in escrow_agreements.commission_rule_id - a column
@@ -247,23 +291,13 @@ export async function calculateCommission(
       .single();
     if (settingsError) throw settingsError;
 
-    const commissionKobo =
-      settings.admin_commission_type === "percentage"
-        ? Math.round((amountKobo * settings.admin_commission_value) / 100)
-        : settings.admin_commission_value;
+    const commissionKobo = commissionFromSettings(settings, amountKobo);
 
     return { commissionKobo, rule: null as null, tierId: null as string | null };
   }
 
   const rule = rows[0];
-  let commissionKobo: number;
-  if (rule.mode === "percentage") {
-    commissionKobo = Math.round((amountKobo * rule.value) / 100);
-  } else {
-    commissionKobo = rule.value;
-  }
-  if (rule.min_kobo != null) commissionKobo = Math.max(commissionKobo, rule.min_kobo);
-  if (rule.max_kobo != null) commissionKobo = Math.min(commissionKobo, rule.max_kobo);
+  const commissionKobo = commissionFromRule(rule, amountKobo);
 
   // deno-lint-ignore no-explicit-any
   return { commissionKobo, rule: rule as any, tierId: null as string | null };

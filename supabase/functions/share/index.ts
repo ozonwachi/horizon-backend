@@ -54,7 +54,7 @@ function renderPage(opts: {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>${safeTitle} - Project Horizon</title>
+  <title>${safeTitle} - Prexpa</title>
   <meta property="og:title" content="${safeTitle}" />
   <meta property="og:description" content="${safeSubtitle}" />
   ${ogImageTag}
@@ -106,7 +106,7 @@ function renderPage(opts: {
       <h1>${safeTitle}</h1>
       <div class="subtitle">${safeSubtitle}</div>
       ${detailRows}
-      <span class="badge">Shared from Project Horizon</span>
+      <span class="badge">Shared from Prexpa</span>
     </div>
   </div>
 </body>
@@ -197,7 +197,7 @@ app.get("/deal/:id", async (c) => {
   return c.html(
     renderPage({
       title: label,
-      subtitle: `₦${amountNaira} · Custom deal on Project Horizon`,
+      subtitle: `₦${amountNaira} · Custom deal on Prexpa`,
       details: data.description ? [data.description] : [],
     })
   );

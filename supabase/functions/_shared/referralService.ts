@@ -164,7 +164,7 @@ export async function processReferralPayoutsForAgreement(
 
 export type ReferralSummary = {
   referralCode: string;
-  // Present only once HORIZON_APP_URL is configured (see getReferralLink) -
+  // Present only once PREXPA_APP_URL is configured (see getReferralLink) -
   // until then referralCode alone is still fully usable, just not as a
   // tap-to-open link.
   referralLink: string | null;
@@ -180,7 +180,7 @@ export type ReferralSummary = {
 };
 
 // Builds a shareable https link once the app has a domain configured. Set
-// HORIZON_APP_URL (e.g. "https://horizon.app") as a Supabase Edge Function
+// PREXPA_APP_URL (e.g. "https://prexpa.com") as a Supabase Edge Function
 // secret when that domain exists and is wired up for app/universal links
 // (assetlinks.json on Android, apple-app-site-association on iOS, plus
 // app_links initialized in main.dart - none of that is set up yet, this
@@ -188,13 +188,13 @@ export type ReferralSummary = {
 // null and the app falls back to sharing the short code by itself, which
 // already works everywhere (typed in by hand, texted, pasted).
 function getReferralLink(referralCode: string): string | null {
-  const base = Deno.env.get("HORIZON_APP_URL");
+  const base = Deno.env.get("PREXPA_APP_URL");
   if (!base) return null;
   return `${base.replace(/\/+$/, "")}/r/${referralCode}`;
 }
 
 // Everything the "My Referrals" screen needs in one call: the user's own
-// short referral code (and a link built from it, once HORIZON_APP_URL is
+// short referral code (and a link built from it, once PREXPA_APP_URL is
 // set), who they've referred and how many of each referred person's trades
 // have paid out so far, the per-person cap, and their all-time total earned.
 export async function getReferralSummary(

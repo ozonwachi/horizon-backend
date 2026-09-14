@@ -6,7 +6,7 @@
 // resend.dev sandbox address for testing - see the caveat below), grab an
 // API key, then:
 //   supabase secrets set RESEND_API_KEY='re_your_key_here'
-//   supabase secrets set EMAIL_FROM='Horizon <notifications@yourdomain.com>'
+//   supabase secrets set EMAIL_FROM='Prexpa <notifications@prexpa.com>'
 //
 // Caveat while EMAIL_FROM is left unset/on the sandbox default
 // ("onboarding@resend.dev"): Resend's sandbox sender can only deliver to
@@ -22,7 +22,7 @@
 // notification or push that triggered it.
 
 const RESEND_API_URL = "https://api.resend.com/emails";
-const DEFAULT_FROM = "Horizon <onboarding@resend.dev>";
+const DEFAULT_FROM = "Prexpa <onboarding@resend.dev>";
 
 export type EmailMessage = {
   to: string;
@@ -75,7 +75,7 @@ export function simpleEmailHtml({ heading, body }: { heading: string; body: stri
     <div style="font-family: -apple-system, Helvetica, Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; color: #1a1a1a;">
       <h2 style="margin: 0 0 16px; font-size: 18px;">${heading}</h2>
       ${escapedBody}
-      <p style="margin: 24px 0 0; font-size: 12px; color: #888;">This is an automated message from Horizon.</p>
+      <p style="margin: 24px 0 0; font-size: 12px; color: #888;">This is an automated message from Prexpa.</p>
     </div>
   `;
 }

@@ -1,7 +1,7 @@
 {
   "name": "horizon-backend",
   "version": "1.0.0",
-  "description": "Project Horizon backend - Escrow + Paystack logic, running on Supabase Postgres",
+  "description": "Prexpa backend - Escrow + Paystack logic, running on Supabase Postgres",
   "main": "src/index.js",
   "type": "commonjs",
   "scripts": {
