@@ -76,6 +76,12 @@
   nav.tabs { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; }
   nav.tabs button { background: var(--panel); }
   nav.tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  nav.tabs button { position: relative; }
+  .tab-badge {
+    display: inline-block; min-width: 16px; padding: 1px 5px; margin-left: 6px;
+    background: var(--danger); color: #fff; border-radius: 999px;
+    font-size: 10px; font-weight: 700; line-height: 1.4; vertical-align: middle;
+  }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
   th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
@@ -157,6 +163,8 @@ const state = {
   contactMessages: [],
   offPlatformDeals: [],
   analytics: null,
+  needsAttention: {},
+  disputeCount: 0,
   busy: false,
 };
 
@@ -258,6 +266,7 @@ async function enterDashboard() {
     state.isOwner = false;
   }
   await loadWithdrawals();
+  await refreshBadges();
   render();
 }
 
@@ -382,6 +391,37 @@ async function loadAnalytics() {
   state.analytics = await apiFetch("/admin/analytics");
 }
 
+// Powers the red count badges on tabs. Reuses get_platform_analytics()'s
+// existing needsAttention object (already computed for the old Flutter
+// admin analytics screen) rather than inventing new counting endpoints -
+// only the dispute count has to be derived separately since disputes
+// aren't in that object.
+async function refreshBadges() {
+  try {
+    const a = await apiFetch("/admin/analytics");
+    state.needsAttention = a.needsAttention || {};
+  } catch (_) { /* non-fatal - badges just stay at their last known value */ }
+  try {
+    const disputes = await apiFetch("/escrow/agreements/admin/all?status=disputed");
+    state.disputeCount = disputes.reduce((n, a) => n + (a.tranches || []).filter((t) => t.status === "disputed").length, 0);
+  } catch (_) { /* non-fatal */ }
+}
+
+function badgeCountFor(tabKey) {
+  const n = state.needsAttention || {};
+  switch (tabKey) {
+    case "withdrawals": return n.pendingWithdrawals || 0;
+    case "disputes": return state.disputeCount || 0;
+    case "reports": return n.openReports || 0;
+    case "verification": return n.pendingVerifications || 0;
+    case "contactFlags": return n.openContactShareFlags || 0;
+    case "banEvasion": return n.openBanEvasionFlags || 0;
+    case "contactMessages": return n.openAdminContactMessages || 0;
+    case "offPlatformDeals": return n.openOffPlatformDealReports || 0;
+    default: return 0;
+  }
+}
+
 
 async function loadStaff() {
   state.staff = await apiFetch("/admin/staff");
@@ -400,6 +440,7 @@ async function approveWithdrawal(id) {
     await apiFetch("/wallet/admin/withdrawals/" + id + "/approve", { method: "POST" });
     toast("Approval recorded.", "ok");
     await loadWithdrawals();
+    await refreshBadges();
     render();
   } catch (e) { toast(e.message, "error"); }
 }
@@ -409,6 +450,7 @@ async function rejectWithdrawal(id, reason) {
     await apiFetch("/wallet/admin/withdrawals/" + id + "/reject", { method: "POST", body: { reason } });
     toast("Withdrawal rejected.", "ok");
     await loadWithdrawals();
+    await refreshBadges();
     render();
   } catch (e) { toast(e.message, "error"); }
 }
@@ -511,6 +553,7 @@ async function resolveDispute(agreementId, trancheId, outcome, reason) {
     });
     toast("Dispute resolved.", "ok");
     await loadDisputes();
+    await refreshBadges();
     render();
   } catch (e) { toast(e.message, "error"); }
 }
@@ -520,6 +563,7 @@ async function updateReportStatus(id, status) {
     await apiFetch("/admin/reports/" + id, { method: "PATCH", body: { status } });
     toast("Report updated.", "ok");
     await loadReports();
+    await refreshBadges();
     render();
   } catch (e) { toast(e.message, "error"); }
 }
@@ -529,21 +573,28 @@ async function deleteReportedPost(id) {
     await apiFetch("/admin/reports/" + id + "/post", { method: "DELETE" });
     toast("Post removed.", "ok");
     await loadReports();
+    await refreshBadges();
     render();
   } catch (e) { toast(e.message, "error"); }
 }
 
-async function setUserAccountStatus(uid, status, reason) {
+async function findUserByEmail(email) {
+  return apiFetch("/admin/users/lookup?email=" + encodeURIComponent(email.trim()));
+}
+
+async function setUserAccountStatus(email, status, reason) {
   try {
-    await apiFetch("/admin/users/" + uid + "/status", { method: "POST", body: { status, reason } });
-    toast("Account status updated.", "ok");
+    const user = await findUserByEmail(email);
+    await apiFetch("/admin/users/" + user.uid + "/status", { method: "POST", body: { status, reason } });
+    toast("Account status updated for " + (user.name || user.email) + ".", "ok");
   } catch (e) { toast(e.message, "error"); }
 }
 
-async function setUserTrustLevel(uid, trustLevel) {
+async function setUserTrustLevel(email, trustLevel) {
   try {
-    await apiFetch("/admin/users/" + uid + "/trust-level", { method: "POST", body: { trustLevel } });
-    toast("Trust level updated.", "ok");
+    const user = await findUserByEmail(email);
+    await apiFetch("/admin/users/" + user.uid + "/trust-level", { method: "POST", body: { trustLevel } });
+    toast("Trust level updated for " + (user.name || user.email) + ".", "ok");
   } catch (e) { toast(e.message, "error"); }
 }
 
@@ -553,6 +604,7 @@ async function decideVerification(id, status, adminNotes) {
     toast("Verification decided.", "ok");
     state.verificationDetail = null;
     await loadVerifications();
+    await refreshBadges();
     render();
   } catch (e) { toast(e.message, "error"); }
 }
@@ -562,6 +614,7 @@ async function updateContactFlagStatus(id, status) {
     await apiFetch("/admin/contact-flags/" + id, { method: "PATCH", body: { status } });
     toast("Flag updated.", "ok");
     await loadContactFlags();
+    await refreshBadges();
     render();
   } catch (e) { toast(e.message, "error"); }
 }
@@ -571,6 +624,7 @@ async function updateBanEvasionStatus(id, status) {
     await apiFetch("/admin/ban-evasion-flags/" + id, { method: "PATCH", body: { status } });
     toast("Flag updated.", "ok");
     await loadBanEvasionFlags();
+    await refreshBadges();
     render();
   } catch (e) { toast(e.message, "error"); }
 }
@@ -661,6 +715,7 @@ async function replyToContactMessage(id, reply) {
     await apiFetch("/admin/contact-messages/" + id + "/reply", { method: "POST", body: { reply } });
     toast("Reply sent.", "ok");
     await loadContactMessages();
+    await refreshBadges();
     render();
   } catch (e) { toast(e.message, "error"); }
 }
@@ -673,11 +728,12 @@ async function sendBroadcast(title, body, skillTagsCsv, sendEmail) {
   } catch (e) { toast(e.message, "error"); }
 }
 
-async function creditWallet(uid, nairaAmount, reason) {
+async function creditWallet(email, nairaAmount, reason) {
   try {
+    const user = await findUserByEmail(email);
     const amountKobo = Math.round(Number(nairaAmount) * 100);
-    const r = await apiFetch("/admin/users/" + uid + "/wallet-credit", { method: "POST", body: { amountKobo, reason } });
-    toast("Wallet credited. New balance: " + toNaira(r.balanceKobo), "ok");
+    const r = await apiFetch("/admin/users/" + user.uid + "/wallet-credit", { method: "POST", body: { amountKobo, reason } });
+    toast("Credited " + (user.name || user.email) + ". New balance: " + toNaira(r.balanceKobo), "ok");
   } catch (e) { toast(e.message, "error"); }
 }
 
@@ -693,6 +749,7 @@ async function updateOffPlatformDealStatus(id, status) {
     await apiFetch("/admin/off-platform-deal-reports/" + id, { method: "PATCH", body: { status } });
     toast("Report updated.", "ok");
     await loadOffPlatformDeals();
+    await refreshBadges();
     render();
   } catch (e) { toast(e.message, "error"); }
 }
@@ -723,7 +780,7 @@ function renderModal() {
       const opts = f.options.map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join("");
       return `<label>${escapeHtml(f.label)}</label><select data-field="${f.name}">${opts}</select>`;
     }
-    return `<label>${escapeHtml(f.label)}</label><input data-field="${f.name}" type="text" placeholder="${escapeHtml(f.placeholder || "")}" />`;
+    return `<label>${escapeHtml(f.label)}</label><input data-field="${f.name}" type="${f.type === "user-email" ? "email" : "text"}" placeholder="${escapeHtml(f.placeholder || "")}" />`;
   }).join("");
   return `
     <div class="modal-backdrop" id="modal-backdrop">
@@ -749,6 +806,12 @@ function wireModal() {
       values[f.name] = document.querySelector(`[data-field="${f.name}"]`).value;
     });
     try {
+      for (const f of modalState.fields) {
+        if (f.type === "user-email" && values[f.name]) {
+          const user = await findUserByEmail(values[f.name]);
+          values[f.name] = user.uid;
+        }
+      }
       await modalState.onSubmit(values);
       closeModal();
     } catch (e) {
@@ -1025,8 +1088,8 @@ function renderModeration() {
     <div class="panel">
       <h2>Account status</h2>
       <p class="muted">Set a user's account status by their UID. active / investigating / frozen / banned / deactivated.</p>
-      <label>User UID</label>
-      <input id="mod-uid" type="text" placeholder="uuid" />
+      <label>User email</label>
+      <input id="mod-email" type="email" placeholder="user@example.com" />
       <label>Status</label>
       <select id="mod-status">
         <option value="active">active</option>
@@ -1043,8 +1106,8 @@ function renderModeration() {
     <div class="panel">
       <h2>Trust level override</h2>
       <p class="muted">Owner-only: grant or revoke trusted_business directly, bypassing the verification request queue.</p>
-      <label>User UID</label>
-      <input id="trust-uid" type="text" placeholder="uuid" />
+      <label>User email</label>
+      <input id="trust-email" type="email" placeholder="user@example.com" />
       <label>Trust level</label>
       <select id="trust-level">
         <option value="basic">basic</option>
@@ -1266,8 +1329,8 @@ function renderTools() {
     </div>
     <div class="panel">
       <h2>Credit a user's wallet</h2>
-      <label>User UID</label>
-      <input id="credit-uid" type="text" />
+      <label>User email</label>
+      <input id="credit-email" type="email" placeholder="user@example.com" />
       <label>Amount (₦)</label>
       <input id="credit-amount" type="number" step="0.01" />
       <label>Reason (required)</label>
@@ -1325,7 +1388,10 @@ function renderDashboard() {
       <button id="signout-btn">Sign out</button>
     </header>
     <nav class="tabs">
-      ${visible.map((t) => `<button data-tab="${t.key}" class="${state.tab === t.key ? "active" : ""}">${escapeHtml(t.label)}</button>`).join("")}
+      ${visible.map((t) => {
+        const count = badgeCountFor(t.key);
+        return `<button data-tab="${t.key}" class="${state.tab === t.key ? "active" : ""}">${escapeHtml(t.label)}${count > 0 ? `<span class="tab-badge">${count > 99 ? "99+" : count}</span>` : ""}</button>`;
+      }).join("")}
     </nav>
     <div id="tab-content">${content}</div>
     ${renderModal()}
@@ -1412,7 +1478,7 @@ function wireStaffActions() {
   if (grantBtn) grantBtn.onclick = () => openModal({
     title: "Grant staff access",
     fields: [
-      { name: "uid", label: "User UID", placeholder: "existing account's uuid" },
+      { name: "uid", label: "User email", type: "user-email", placeholder: "user@example.com" },
       { name: "role", label: "Role", type: "select", options: [{ value: "worker", label: "Worker" }, { value: "admin", label: "Owner" }] },
     ],
     submitLabel: "Grant",
@@ -1532,13 +1598,13 @@ function wireReportActions() {
 function wireModerationActions() {
   const statusBtn = document.getElementById("mod-status-btn");
   if (statusBtn) statusBtn.onclick = () => setUserAccountStatus(
-    document.getElementById("mod-uid").value.trim(),
+    document.getElementById("mod-email").value.trim(),
     document.getElementById("mod-status").value,
     document.getElementById("mod-reason").value
   );
   const trustBtn = document.getElementById("trust-level-btn");
   if (trustBtn) trustBtn.onclick = () => setUserTrustLevel(
-    document.getElementById("trust-uid").value.trim(),
+    document.getElementById("trust-email").value.trim(),
     document.getElementById("trust-level").value
   );
 }
@@ -1658,7 +1724,7 @@ function wireToolsActions() {
   );
   const creditBtn = document.getElementById("credit-wallet-btn");
   if (creditBtn) creditBtn.onclick = () => creditWallet(
-    document.getElementById("credit-uid").value.trim(),
+    document.getElementById("credit-email").value.trim(),
     document.getElementById("credit-amount").value,
     document.getElementById("credit-reason").value
   );

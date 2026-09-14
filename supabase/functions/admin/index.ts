@@ -2,7 +2,7 @@ import { Hono } from "npm:hono@4";
 import { cors } from "npm:hono@4/cors";
 import { getAdminClient } from "../_shared/supabaseAdmin.ts";
 import { requireAuth, requireAdmin, requireOwnerRole, type AppEnv } from "../_shared/auth.ts";
-import { listStaff, grantStaffRole, revokeStaffRole } from "../_shared/adminManagementService.ts";
+import { listStaff, grantStaffRole, revokeStaffRole, findUserByEmail } from "../_shared/adminManagementService.ts";
 import {
   getSettings,
   listCommissionRules,
@@ -666,6 +666,21 @@ app.post("/push-diagnostics/test", async (c) => {
   } catch (err) {
     console.error("Push diagnostics failed:", err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+// Resolves an email to a uid for every "enter a user" form in the
+// dashboard (grant staff, set account status, credit wallet, ...) - any
+// admin can use it, it's read-only.
+app.get("/users/lookup", async (c) => {
+  const email = c.req.query("email") ?? "";
+  try {
+    const user = await findUserByEmail(getAdminClient(), email);
+    if (!user) return c.json({ error: "No account with that email" }, 404);
+    return c.json(user);
+  } catch (err) {
+    console.error("User lookup failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
   }
 });
 

@@ -20,6 +20,28 @@ function toStaffMember(row: any): StaffMember {
   };
 }
 
+// Lets the dashboard resolve "who is this" by email instead of requiring
+// the admin to already know a raw uuid (uid is what every mutating admin
+// action actually takes - Postgres has no notion of "the user with this
+// email" built in, so this is the one lookup step that bridges the two).
+// Any admin can use this - it's a read-only lookup, not a privileged
+// action; the actual mutations it feeds into (grant staff, set status,
+// credit wallet) are gated wherever they already were.
+export async function findUserByEmail(
+  supabase: SupabaseClient,
+  email: string
+): Promise<{ uid: string; name: string; email: string } | null> {
+  const trimmed = (email || "").trim();
+  if (!trimmed) throw new Error("email is required");
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("uid, name, email")
+    .ilike("email", trimmed)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
 export async function listStaff(supabase: SupabaseClient): Promise<StaffMember[]> {
   const { data, error } = await supabase
     .from(PROFILES_TABLE)
