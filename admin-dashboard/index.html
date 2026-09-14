@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex, nofollow" />
-<title>Prexpa Staff</title>
+<title>Fashion World</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <style>
   :root {
@@ -116,7 +116,7 @@
 
 <script>
 // ---------------------------------------------------------------------------
-// Prexpa Staff dashboard. Private, unlinked, noindex - never bundled into
+// Fashion World staff dashboard. Private, unlinked, noindex - never bundled into
 // the mobile app. Every real decision (who's admin, who's owner, MFA state)
 // is enforced by the backend on every request; this page is just a thin
 // client over supabase-js (auth/MFA) + the horizon-backend-fresh edge
@@ -134,7 +134,7 @@ const app = document.getElementById("app");
 
 const state = {
   view: "loading", // loading | login | mfa-enroll | mfa-challenge | dashboard
-  tab: "withdrawals", // withdrawals | staff | settings
+  tab: "withdrawals",
   session: null,
   isOwner: false,
   error: null,
@@ -144,6 +144,19 @@ const state = {
   approvalsByRequest: {}, // requestId -> [approvals]
   staff: [],
   settings: null,
+  disputes: [],
+  reports: [],
+  verifications: [],
+  verificationDetail: null, // { ...request, applicantName, frontUrl, backUrl, selfieUrl }
+  contactFlags: [],
+  banEvasionFlags: [],
+  bannedPhones: [],
+  categories: [],
+  regions: [],
+  faqs: [],
+  contactMessages: [],
+  offPlatformDeals: [],
+  analytics: null,
   busy: false,
 };
 
@@ -306,13 +319,76 @@ async function loadApprovals(requestId) {
   render();
 }
 
+async function loadDisputes() {
+  state.disputes = await apiFetch("/escrow/agreements/admin/all?status=disputed");
+}
+
+async function loadReports() {
+  const r = await apiFetch("/admin/reports");
+  state.reports = r.reports;
+}
+
+async function loadVerifications() {
+  const r = await apiFetch("/admin/verifications");
+  state.verifications = r.requests;
+}
+
+async function loadVerificationDetail(id) {
+  state.verificationDetail = await apiFetch("/admin/verifications/" + id);
+  render();
+}
+
+async function loadContactFlags() {
+  const r = await apiFetch("/admin/contact-flags");
+  state.contactFlags = r.flags;
+}
+
+async function loadBanEvasionFlags() {
+  const r = await apiFetch("/admin/ban-evasion-flags");
+  state.banEvasionFlags = r.flags;
+}
+
+async function loadBannedPhones() {
+  const r = await apiFetch("/admin/banned-phones");
+  state.bannedPhones = r.snapshots;
+}
+
+async function loadCategories() {
+  const r = await apiFetch("/admin/categories");
+  state.categories = r.categories;
+}
+
+async function loadRegions() {
+  const r = await apiFetch("/admin/regions");
+  state.regions = r.regions;
+}
+
+async function loadFaqs() {
+  const r = await apiFetch("/admin/faqs");
+  state.faqs = r.faqs;
+}
+
+async function loadContactMessages() {
+  const r = await apiFetch("/admin/contact-messages");
+  state.contactMessages = r.messages;
+}
+
+async function loadOffPlatformDeals() {
+  const r = await apiFetch("/admin/off-platform-deal-reports");
+  state.offPlatformDeals = r.reports;
+}
+
+async function loadAnalytics() {
+  state.analytics = await apiFetch("/admin/analytics");
+}
+
+
 async function loadStaff() {
   state.staff = await apiFetch("/admin/staff");
 }
 
 async function loadSettings() {
-  const s = await apiFetch("/admin/settings");
-  state.settings = s.settings;
+  state.settings = await apiFetch("/admin/settings"); // { settings, commissionRules, commissionTiers }
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +459,254 @@ async function updateThreshold(nairaValue) {
   } catch (e) { toast(e.message, "error"); }
 }
 
+async function updatePlatformSettings(fields) {
+  try {
+    await apiFetch("/admin/settings", { method: "PATCH", body: fields });
+    toast("Settings updated.", "ok");
+    await loadSettings();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function upsertCommissionRule(fields) {
+  try {
+    await apiFetch("/admin/commission-rules", { method: "PUT", body: fields });
+    toast("Commission rule saved.", "ok");
+    await loadSettings();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function deleteCommissionRule(id) {
+  try {
+    await apiFetch("/admin/commission-rules/" + id, { method: "DELETE" });
+    toast("Commission rule deleted.", "ok");
+    await loadSettings();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function createCommissionTier(fields) {
+  try {
+    await apiFetch("/admin/commission-tiers", { method: "POST", body: fields });
+    toast("Commission tier created.", "ok");
+    await loadSettings();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function deleteCommissionTier(id) {
+  try {
+    await apiFetch("/admin/commission-tiers/" + id, { method: "DELETE" });
+    toast("Commission tier deleted.", "ok");
+    await loadSettings();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function resolveDispute(agreementId, trancheId, outcome, reason) {
+  try {
+    await apiFetch("/escrow/agreements/" + agreementId + "/tranches/" + trancheId + "/admin-resolve", {
+      method: "POST", body: { outcome, reason },
+    });
+    toast("Dispute resolved.", "ok");
+    await loadDisputes();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function updateReportStatus(id, status) {
+  try {
+    await apiFetch("/admin/reports/" + id, { method: "PATCH", body: { status } });
+    toast("Report updated.", "ok");
+    await loadReports();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function deleteReportedPost(id) {
+  try {
+    await apiFetch("/admin/reports/" + id + "/post", { method: "DELETE" });
+    toast("Post removed.", "ok");
+    await loadReports();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function setUserAccountStatus(uid, status, reason) {
+  try {
+    await apiFetch("/admin/users/" + uid + "/status", { method: "POST", body: { status, reason } });
+    toast("Account status updated.", "ok");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function setUserTrustLevel(uid, trustLevel) {
+  try {
+    await apiFetch("/admin/users/" + uid + "/trust-level", { method: "POST", body: { trustLevel } });
+    toast("Trust level updated.", "ok");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function decideVerification(id, status, adminNotes) {
+  try {
+    await apiFetch("/admin/verifications/" + id, { method: "PATCH", body: { status, adminNotes } });
+    toast("Verification decided.", "ok");
+    state.verificationDetail = null;
+    await loadVerifications();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function updateContactFlagStatus(id, status) {
+  try {
+    await apiFetch("/admin/contact-flags/" + id, { method: "PATCH", body: { status } });
+    toast("Flag updated.", "ok");
+    await loadContactFlags();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function updateBanEvasionStatus(id, status) {
+  try {
+    await apiFetch("/admin/ban-evasion-flags/" + id, { method: "PATCH", body: { status } });
+    toast("Flag updated.", "ok");
+    await loadBanEvasionFlags();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function createCategory(fields) {
+  try {
+    await apiFetch("/admin/categories", { method: "POST", body: fields });
+    toast("Category created.", "ok");
+    await loadCategories();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function updateCategory(id, fields) {
+  try {
+    await apiFetch("/admin/categories/" + id, { method: "PATCH", body: fields });
+    toast("Category updated.", "ok");
+    await loadCategories();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function deleteCategory(id) {
+  try {
+    await apiFetch("/admin/categories/" + id, { method: "DELETE" });
+    toast("Category deleted.", "ok");
+    await loadCategories();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function createRegion(fields) {
+  try {
+    await apiFetch("/admin/regions", { method: "POST", body: fields });
+    toast("Region created.", "ok");
+    await loadRegions();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function updateRegion(id, fields) {
+  try {
+    await apiFetch("/admin/regions/" + id, { method: "PATCH", body: fields });
+    toast("Region updated.", "ok");
+    await loadRegions();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function deleteRegion(id) {
+  try {
+    await apiFetch("/admin/regions/" + id, { method: "DELETE" });
+    toast("Region deleted.", "ok");
+    await loadRegions();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function createFaq(fields) {
+  try {
+    await apiFetch("/admin/faqs", { method: "POST", body: fields });
+    toast("FAQ created.", "ok");
+    await loadFaqs();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function updateFaq(id, fields) {
+  try {
+    await apiFetch("/admin/faqs/" + id, { method: "PATCH", body: fields });
+    toast("FAQ updated.", "ok");
+    await loadFaqs();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function deleteFaq(id) {
+  try {
+    await apiFetch("/admin/faqs/" + id, { method: "DELETE" });
+    toast("FAQ deleted.", "ok");
+    await loadFaqs();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function replyToContactMessage(id, reply) {
+  try {
+    await apiFetch("/admin/contact-messages/" + id + "/reply", { method: "POST", body: { reply } });
+    toast("Reply sent.", "ok");
+    await loadContactMessages();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function sendBroadcast(title, body, skillTagsCsv, sendEmail) {
+  try {
+    const skillTags = skillTagsCsv ? skillTagsCsv.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+    await apiFetch("/admin/broadcast", { method: "POST", body: { title, body, skillTags, sendEmail } });
+    toast("Broadcast sent.", "ok");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function creditWallet(uid, nairaAmount, reason) {
+  try {
+    const amountKobo = Math.round(Number(nairaAmount) * 100);
+    const r = await apiFetch("/admin/users/" + uid + "/wallet-credit", { method: "POST", body: { amountKobo, reason } });
+    toast("Wallet credited. New balance: " + toNaira(r.balanceKobo), "ok");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function runPushDiagnosticsTest() {
+  try {
+    const r = await apiFetch("/admin/push-diagnostics/test", { method: "POST" });
+    toast("Push diagnostics: " + JSON.stringify(r), "ok");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function updateOffPlatformDealStatus(id, status) {
+  try {
+    await apiFetch("/admin/off-platform-deal-reports/" + id, { method: "PATCH", body: { status } });
+    toast("Report updated.", "ok");
+    await loadOffPlatformDeals();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function payOffPlatformDealReward(id, nairaAmount) {
+  try {
+    const rewardKobo = Math.round(Number(nairaAmount) * 100);
+    await apiFetch("/admin/off-platform-deal-reports/" + id + "/reward", { method: "POST", body: { rewardKobo } });
+    toast("Reward paid.", "ok");
+    await loadOffPlatformDeals();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
 // ---------------------------------------------------------------------------
 // Modal (used for reject-reason / manual-reference / bank-pick prompts)
 // ---------------------------------------------------------------------------
@@ -441,8 +765,8 @@ function renderLogin() {
   app.innerHTML = `
     <div class="center-screen">
       <div class="card">
-        <h1>Prexpa Staff</h1>
-        <p class="sub">Owner &amp; worker access only.</p>
+        <h1>Fashion World</h1>
+        <p class="sub">Staff login.</p>
         <label>Email</label>
         <input id="email" type="email" autocomplete="username" />
         <label>Password</label>
@@ -573,35 +897,435 @@ function renderStaff() {
 }
 
 function renderSettings() {
-  const thresholdNaira = state.settings ? (state.settings.payoutHighTierThresholdKobo / 100).toFixed(2) : "...";
+  const s = state.settings;
+  const thresholdNaira = s ? (s.settings.payoutHighTierThresholdKobo / 100).toFixed(2) : "...";
+  const ps = s ? s.settings : {};
+
+  const rulesRows = (s ? s.commissionRules : []).map((r) => `
+    <tr>
+      <td>${escapeHtml(r.type)}${r.category ? " / " + escapeHtml(r.category) : ""}</td>
+      <td>${escapeHtml(r.mode)}</td>
+      <td>
+        <input data-rule-value="${r.id}" type="number" step="0.01" value="${escapeHtml(r.value)}" style="width:100px;display:inline-block" />
+        <button data-save-rule-value="${r.id}" data-rule-type="${escapeHtml(r.type)}" data-rule-category="${escapeHtml(r.category || "")}" data-rule-mode="${escapeHtml(r.mode)}" data-rule-min="${r.minKobo ?? ""}" data-rule-max="${r.maxKobo ?? ""}">Save</button>
+        ${state.isOwner ? `<button class="danger" data-delete-rule="${r.id}">Delete</button>` : ""}
+      </td>
+    </tr>`).join("");
+
+  const tiersRows = (s ? s.commissionTiers : []).map((t) => `
+    <tr>
+      <td>${escapeHtml(t.type)}${t.category ? " / " + escapeHtml(t.category) : ""}</td>
+      <td>${toNaira(t.minAmountKobo)} – ${t.maxAmountKobo != null ? toNaira(t.maxAmountKobo) : "∞"}</td>
+      <td>${escapeHtml(t.mode)} · ${escapeHtml(t.value)}</td>
+      <td>${state.isOwner ? `<button class="danger" data-delete-tier="${t.id}">Delete</button>` : `<span class="muted">owner only</span>`}</td>
+    </tr>`).join("");
+
   return `
+    ${state.isOwner ? `
     <div class="panel">
-      <h2>Payout approval tier threshold</h2>
-      <p class="muted">Requests at or below this amount need any one admin's approval. Above it, the owner alone or two distinct workers.</p>
+      <h2>Payout approval tier / dispute escalation threshold</h2>
+      <p class="muted">Requests (and disputes) at or below this amount need any one admin. Above it, the owner alone or two distinct workers. Owner only.</p>
       <label>Threshold (₦)</label>
       <input id="threshold-input" type="number" step="0.01" value="${escapeHtml(thresholdNaira)}" />
       <button class="primary full" id="save-threshold-btn">Save</button>
+    </div>` : ""}
+
+    <div class="panel">
+      <h2>Platform settings</h2>
+      <label>Admin commission type</label>
+      <select id="admin-commission-type"><option value="flat" ${ps.adminCommissionType === "flat" ? "selected" : ""}>Flat</option><option value="percentage" ${ps.adminCommissionType === "percentage" ? "selected" : ""}>Percentage</option></select>
+      <label>Admin commission value</label>
+      <input id="admin-commission-value" type="number" step="0.01" value="${escapeHtml(ps.adminCommissionValue ?? "")}" />
+      <label>Referral commission type</label>
+      <select id="referral-commission-type"><option value="flat" ${ps.referralCommissionType === "flat" ? "selected" : ""}>Flat</option><option value="percentage" ${ps.referralCommissionType === "percentage" ? "selected" : ""}>Percentage</option></select>
+      <label>Referral commission value</label>
+      <input id="referral-commission-value" type="number" step="0.01" value="${escapeHtml(ps.referralCommissionValue ?? "")}" />
+      <label>Referral max payouts per referred user</label>
+      <input id="referral-max-payouts" type="number" value="${escapeHtml(ps.referralMaxPayoutsPerReferredUser ?? "")}" />
+      <label>Connection fee type</label>
+      <select id="connection-fee-type"><option value="flat" ${ps.connectionFeeType === "flat" ? "selected" : ""}>Flat</option><option value="percentage" ${ps.connectionFeeType === "percentage" ? "selected" : ""}>Percentage</option></select>
+      <label>Connection fee value</label>
+      <input id="connection-fee-value" type="number" step="0.01" value="${escapeHtml(ps.connectionFeeValue ?? "")}" />
+      <button class="primary full" id="save-platform-settings-btn">Save platform settings</button>
+    </div>
+
+    <div class="panel">
+      <h2>Commission rules</h2>
+      <p class="muted">Workers can edit an existing rule's value. Only the owner can create, delete, or change type/category/mode.</p>
+      <table>
+        <thead><tr><th>Type / category</th><th>Mode</th><th>Value</th></tr></thead>
+        <tbody>${rulesRows || `<tr><td colspan="3" class="muted">No commission rules.</td></tr>`}</tbody>
+      </table>
+      ${state.isOwner ? `<button class="full" id="new-commission-rule-btn" style="margin-top:12px">New commission rule</button>` : ""}
+    </div>
+
+    ${state.isOwner ? `
+    <div class="panel">
+      <h2>Commission tiers</h2>
+      <p class="muted">Amount-based commission ladder. Owner only.</p>
+      <table>
+        <thead><tr><th>Type / category</th><th>Amount range</th><th>Mode / value</th><th></th></tr></thead>
+        <tbody>${tiersRows || `<tr><td colspan="4" class="muted">No commission tiers.</td></tr>`}</tbody>
+      </table>
+      <button class="full" id="new-commission-tier-btn" style="margin-top:12px">New commission tier</button>
+    </div>` : ""}
+  `;
+}
+
+function renderDisputes() {
+  const rows = state.disputes.map((a) => (a.tranches || []).filter((t) => t.status === "disputed").map((t) => `
+    <tr>
+      <td>
+        <div>${escapeHtml(a.title || a.type)}</div>
+        <div class="muted">buyer ${escapeHtml(a.buyerId)} · seller ${escapeHtml(a.sellerId)}</div>
+      </td>
+      <td>${toNaira(t.amountKobo)}<div class="muted">${escapeHtml(t.label)}</div></td>
+      <td>${escapeHtml(t.disputeReason || a.disputeReason || "")}</td>
+      <td class="row-actions">
+        <button class="ok" data-resolve-release="${a.id}|${t.id}">Release to seller</button>
+        <button class="danger" data-resolve-refund="${a.id}|${t.id}">Refund buyer</button>
+      </td>
+    </tr>`).join("")).join("");
+  return `
+    <div class="panel">
+      <h2>Disputed deals</h2>
+      <p class="muted">Workers must escalate disputes above the payout threshold (Settings tab) to the owner.</p>
+      <table>
+        <thead><tr><th>Deal</th><th>Amount</th><th>Reason</th><th>Resolve</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="4" class="muted">No disputed tranches.</td></tr>`}</tbody>
+      </table>
     </div>`;
 }
 
+function renderReports() {
+  const rows = state.reports.map((r) => `
+    <tr>
+      <td>${escapeHtml(r.targetType)}<div class="muted">${escapeHtml(r.targetTitle || r.targetId)}</div></td>
+      <td>${escapeHtml(r.reason)}<div class="muted">${escapeHtml(r.details || "")}</div></td>
+      <td><span class="badge ${escapeHtml(r.status)}">${escapeHtml(r.status)}</span></td>
+      <td class="muted">by ${escapeHtml(r.reporterName || r.reporterUid)}</td>
+      <td class="row-actions">
+        <button data-report-status="${r.id}" data-status="reviewed">Mark reviewed</button>
+        <button data-report-status="${r.id}" data-status="dismissed">Dismiss</button>
+        <button class="danger" data-delete-listing="${r.id}">Remove post</button>
+      </td>
+    </tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>Reports</h2>
+      <table>
+        <thead><tr><th>Target</th><th>Reason</th><th>Status</th><th>Reporter</th><th>Actions</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="5" class="muted">No reports.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderModeration() {
+  return `
+    <div class="panel">
+      <h2>Account status</h2>
+      <p class="muted">Set a user's account status by their UID. active / investigating / frozen / banned / deactivated.</p>
+      <label>User UID</label>
+      <input id="mod-uid" type="text" placeholder="uuid" />
+      <label>Status</label>
+      <select id="mod-status">
+        <option value="active">active</option>
+        <option value="investigating">investigating</option>
+        <option value="frozen">frozen</option>
+        <option value="banned">banned</option>
+        <option value="deactivated">deactivated</option>
+      </select>
+      <label>Reason</label>
+      <input id="mod-reason" type="text" placeholder="why" />
+      <button class="primary full" id="mod-status-btn">Set status</button>
+    </div>
+    ${state.isOwner ? `
+    <div class="panel">
+      <h2>Trust level override</h2>
+      <p class="muted">Owner-only: grant or revoke trusted_business directly, bypassing the verification request queue.</p>
+      <label>User UID</label>
+      <input id="trust-uid" type="text" placeholder="uuid" />
+      <label>Trust level</label>
+      <select id="trust-level">
+        <option value="basic">basic</option>
+        <option value="verified">verified</option>
+        <option value="trusted_business">trusted_business</option>
+      </select>
+      <button class="primary full" id="trust-level-btn">Set trust level</button>
+    </div>` : ""}`;
+}
+
+function renderVerification() {
+  if (state.verificationDetail) {
+    const v = state.verificationDetail;
+    return `
+      <div class="panel">
+        <h2>Verification request</h2>
+        <div>${escapeHtml(v.applicantName)} · ${escapeHtml(v.applicantEmail || "")}</div>
+        <div class="muted">${escapeHtml(v.documentType)} · ${escapeHtml(v.status)}</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin:14px 0">
+          <img src="${v.frontUrl}" style="max-width:220px;border-radius:6px" />
+          ${v.backUrl ? `<img src="${v.backUrl}" style="max-width:220px;border-radius:6px" />` : ""}
+          <img src="${v.selfieUrl}" style="max-width:220px;border-radius:6px" />
+        </div>
+        <label>Admin notes</label>
+        <input id="verify-notes" type="text" value="${escapeHtml(v.adminNotes || "")}" />
+        <div class="row-actions" style="margin-top:12px">
+          <button class="ok" data-decide-verification="approved">Approve</button>
+          <button class="danger" data-decide-verification="rejected">Reject</button>
+          <button id="close-verification-detail">Back to list</button>
+        </div>
+      </div>`;
+  }
+  const rows = state.verifications.map((v) => `
+    <tr>
+      <td>${escapeHtml(v.documentType)}</td>
+      <td><span class="badge ${escapeHtml(v.status)}">${escapeHtml(v.status)}</span></td>
+      <td class="muted">${new Date(v.createdAt).toLocaleDateString()}</td>
+      <td><a href="#" data-view-verification="${v.id}">View</a></td>
+    </tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>Verification requests</h2>
+      <table>
+        <thead><tr><th>Document</th><th>Status</th><th>Submitted</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="4" class="muted">No requests.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderContactFlags() {
+  const rows = state.contactFlags.map((f) => `
+    <tr>
+      <td>${escapeHtml(f.senderName)}<div class="muted">${escapeHtml(f.relatedItemTitle || "")}</div></td>
+      <td class="mono">${escapeHtml(f.matchedSnippet)}</td>
+      <td><span class="badge ${escapeHtml(f.status)}">${escapeHtml(f.status)}</span></td>
+      <td class="row-actions">
+        <button data-flag-status="${f.id}" data-status="reviewed">Reviewed</button>
+        <button data-flag-status="${f.id}" data-status="dismissed">Dismiss</button>
+      </td>
+    </tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>Contact-share flags</h2>
+      <table>
+        <thead><tr><th>Sender</th><th>Matched text</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="4" class="muted">No flags.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderBanEvasion() {
+  const rows = state.banEvasionFlags.map((f) => `
+    <tr>
+      <td>${escapeHtml(f.newUid)}</td>
+      <td>${escapeHtml(f.phone)}</td>
+      <td class="muted">matches banned account ${escapeHtml(f.matchedBannedUid)}</td>
+      <td><span class="badge ${escapeHtml(f.status)}">${escapeHtml(f.status)}</span></td>
+      <td class="row-actions">
+        <button data-ban-evasion-status="${f.id}" data-status="reviewed">Mark reviewed</button>
+        <button data-ban-evasion-status="${f.id}" data-status="dismissed">Dismiss</button>
+      </td>
+    </tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>Ban evasion flags</h2>
+      <table>
+        <thead><tr><th>New account</th><th>Phone</th><th>Match</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="5" class="muted">No flags.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderBannedPhones() {
+  const rows = state.bannedPhones.map((p) => `
+    <tr><td>${escapeHtml(p.phone)}</td><td>${escapeHtml(p.name || p.bannedUid || "")}</td><td class="muted">${p.bannedAt ? new Date(p.bannedAt).toLocaleDateString() : ""}</td></tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>Banned phone numbers</h2>
+      <table>
+        <thead><tr><th>Phone</th><th>Account</th><th>Banned</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="3" class="muted">None.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderCategories() {
+  const rows = state.categories.map((c) => `
+    <tr>
+      <td>${escapeHtml(c.name)}</td>
+      <td class="muted">${escapeHtml(c.iconName || "")}</td>
+      <td>${c.active ? "active" : "inactive"}</td>
+      <td class="row-actions">
+        <button data-toggle-category="${c.id}" data-active="${!c.active}">${c.active ? "Deactivate" : "Activate"}</button>
+        <button class="danger" data-delete-category="${c.id}">Delete</button>
+      </td>
+    </tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>Categories</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Icon</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="4" class="muted">No categories.</td></tr>`}</tbody>
+      </table>
+      <button class="full" id="new-category-btn" style="margin-top:12px">New category</button>
+    </div>`;
+}
+
+function renderRegions() {
+  const rows = state.regions.map((r) => `
+    <tr>
+      <td>${escapeHtml(r.countryName)} (${escapeHtml(r.countryCode)})</td>
+      <td>${r.active ? "active" : "inactive"}</td>
+      <td class="row-actions">
+        <button data-toggle-region="${r.id}" data-active="${!r.active}">${r.active ? "Deactivate" : "Activate"}</button>
+        <button class="danger" data-delete-region="${r.id}">Delete</button>
+      </td>
+    </tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>Regions</h2>
+      <table>
+        <thead><tr><th>Country</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="3" class="muted">No regions.</td></tr>`}</tbody>
+      </table>
+      <button class="full" id="new-region-btn" style="margin-top:12px">New region</button>
+    </div>`;
+}
+
+function renderFaqs() {
+  const rows = state.faqs.map((f) => `
+    <tr>
+      <td>${escapeHtml(f.question)}<div class="muted">${escapeHtml(f.answer)}</div></td>
+      <td class="row-actions">
+        <button data-edit-faq="${f.id}" data-question="${escapeHtml(f.question)}" data-answer="${escapeHtml(f.answer)}">Edit</button>
+        <button class="danger" data-delete-faq="${f.id}">Delete</button>
+      </td>
+    </tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>FAQs</h2>
+      <table><tbody>${rows || `<tr><td class="muted">No FAQs.</td></tr>`}</tbody></table>
+      <button class="full" id="new-faq-btn" style="margin-top:12px">New FAQ</button>
+    </div>`;
+}
+
+function renderContactMessages() {
+  const rows = state.contactMessages.map((m) => `
+    <tr>
+      <td>${escapeHtml(m.senderName)}<div class="muted">${escapeHtml(m.senderEmail || m.senderPhone || "")}</div></td>
+      <td>${escapeHtml(m.message)}${m.adminReply ? `<div class="muted">Reply: ${escapeHtml(m.adminReply)}</div>` : ""}</td>
+      <td><span class="badge ${escapeHtml(m.status)}">${escapeHtml(m.status)}</span></td>
+      <td>${m.status !== "replied" ? `<button data-reply-message="${m.id}">Reply</button>` : ""}</td>
+    </tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>Contact messages</h2>
+      <table>
+        <thead><tr><th>From</th><th>Message</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="4" class="muted">No messages.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderOffPlatformDeals() {
+  const rows = state.offPlatformDeals.map((r) => `
+    <tr>
+      <td>${escapeHtml(r.reporterName || r.reporterUid)}</td>
+      <td>${escapeHtml(r.sellerUsername)}<div class="muted">${escapeHtml(r.sellerPhone || "")}</div></td>
+      <td>${escapeHtml(r.dealDescription)}</td>
+      <td><span class="badge ${escapeHtml(r.status)}">${escapeHtml(r.status)}</span>${r.rewardKobo ? `<div class="muted">${toNaira(r.rewardKobo)} paid</div>` : ""}</td>
+      <td class="row-actions">
+        <button data-deal-status="${r.id}" data-status="reviewed">Mark reviewed</button>
+        <button data-deal-status="${r.id}" data-status="dismissed">Dismiss</button>
+        <button data-pay-reward="${r.id}">Pay reward</button>
+      </td>
+    </tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>Off-platform deal reports</h2>
+      <table>
+        <thead><tr><th>Reporter</th><th>Seller</th><th>Deal</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="5" class="muted">No reports.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderTools() {
+  return `
+    <div class="panel">
+      <h2>Broadcast notification</h2>
+      <label>Title</label>
+      <input id="bc-title" type="text" />
+      <label>Body</label>
+      <textarea id="bc-body" rows="3"></textarea>
+      <label>Skill tags (comma-separated, blank = everyone)</label>
+      <input id="bc-skills" type="text" />
+      <label><input id="bc-email" type="checkbox" style="width:auto;display:inline-block" /> Also send email</label>
+      <button class="primary full" id="send-broadcast-btn">Send</button>
+    </div>
+    <div class="panel">
+      <h2>Credit a user's wallet</h2>
+      <label>User UID</label>
+      <input id="credit-uid" type="text" />
+      <label>Amount (₦)</label>
+      <input id="credit-amount" type="number" step="0.01" />
+      <label>Reason (required)</label>
+      <input id="credit-reason" type="text" />
+      <button class="primary full" id="credit-wallet-btn">Credit wallet</button>
+    </div>
+    <div class="panel">
+      <h2>Push notification diagnostics</h2>
+      <p class="muted">Tests your own account's push delivery.</p>
+      <button class="full" id="push-test-btn">Run test</button>
+    </div>`;
+}
+
+function renderAnalytics() {
+  const a = state.analytics || {};
+  const rows = Object.entries(a).map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(typeof v === "object" ? JSON.stringify(v) : v)}</td></tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>Analytics</h2>
+      <table>${rows || `<tr><td class="muted">No data.</td></tr>`}</table>
+    </div>`;
+}
+
+const TAB_CONFIG = [
+  { key: "withdrawals", label: "Withdrawals", ownerOnly: false, render: renderWithdrawals },
+  { key: "disputes", label: "Disputes", ownerOnly: false, render: renderDisputes, load: loadDisputes },
+  { key: "reports", label: "Reports", ownerOnly: false, render: renderReports, load: loadReports },
+  { key: "moderation", label: "Moderation", ownerOnly: false, render: renderModeration },
+  { key: "verification", label: "Verification", ownerOnly: false, render: renderVerification, load: loadVerifications },
+  { key: "contactFlags", label: "Contact Flags", ownerOnly: false, render: renderContactFlags, load: loadContactFlags },
+  { key: "banEvasion", label: "Ban Evasion", ownerOnly: false, render: renderBanEvasion, load: loadBanEvasionFlags },
+  { key: "bannedPhones", label: "Banned Phones", ownerOnly: false, render: renderBannedPhones, load: loadBannedPhones },
+  { key: "categories", label: "Categories", ownerOnly: false, render: renderCategories, load: loadCategories },
+  { key: "regions", label: "Regions", ownerOnly: false, render: renderRegions, load: loadRegions },
+  { key: "faqs", label: "FAQs", ownerOnly: false, render: renderFaqs, load: loadFaqs },
+  { key: "contactMessages", label: "Contact Messages", ownerOnly: false, render: renderContactMessages, load: loadContactMessages },
+  { key: "offPlatformDeals", label: "Off-Platform Deals", ownerOnly: false, render: renderOffPlatformDeals, load: loadOffPlatformDeals },
+  { key: "tools", label: "Tools", ownerOnly: false, render: renderTools },
+  { key: "analytics", label: "Analytics", ownerOnly: false, render: renderAnalytics, load: loadAnalytics },
+  { key: "staff", label: "Staff", ownerOnly: true, render: renderStaff },
+  { key: "settings", label: "Settings", ownerOnly: false, render: renderSettings, load: loadSettings },
+];
+
 function renderDashboard() {
-  const tabs = ["withdrawals"].concat(state.isOwner ? ["staff", "settings"] : []);
-  const tabLabel = { withdrawals: "Withdrawals", staff: "Staff", settings: "Settings" };
-  let content = "";
-  if (state.tab === "withdrawals") content = renderWithdrawals();
-  else if (state.tab === "staff" && state.isOwner) content = renderStaff();
-  else if (state.tab === "settings" && state.isOwner) content = renderSettings();
+  const visible = TAB_CONFIG.filter((t) => !t.ownerOnly || state.isOwner);
+  const active = visible.find((t) => t.key === state.tab) || visible[0];
+  const content = active.render();
 
   app.innerHTML = `
     <header class="top">
       <div>
-        <strong>Prexpa Staff</strong>
+        <strong>Fashion World</strong>
         <div class="who">${escapeHtml(state.session.user.email)} · ${state.isOwner ? "owner" : "worker"}</div>
       </div>
       <button id="signout-btn">Sign out</button>
     </header>
     <nav class="tabs">
-      ${tabs.map((t) => `<button data-tab="${t}" class="${state.tab === t ? "active" : ""}">${tabLabel[t]}</button>`).join("")}
+      ${visible.map((t) => `<button data-tab="${t.key}" class="${state.tab === t.key ? "active" : ""}">${escapeHtml(t.label)}</button>`).join("")}
     </nav>
     <div id="tab-content">${content}</div>
     ${renderModal()}
@@ -611,7 +1335,10 @@ function renderDashboard() {
   document.querySelectorAll("[data-tab]").forEach((btn) => {
     btn.onclick = async () => {
       state.tab = btn.dataset.tab;
-      if (state.tab === "settings" && !state.settings) await loadSettings();
+      const tabCfg = TAB_CONFIG.find((t) => t.key === state.tab);
+      if (tabCfg && tabCfg.load) {
+        try { await tabCfg.load(); } catch (e) { toast(e.message, "error"); }
+      }
       render();
     };
   });
@@ -619,6 +1346,18 @@ function renderDashboard() {
   wireWithdrawalActions();
   wireStaffActions();
   wireSettingsActions();
+  wireDisputeActions();
+  wireReportActions();
+  wireModerationActions();
+  wireVerificationActions();
+  wireContactFlagActions();
+  wireBanEvasionActions();
+  wireCategoryActions();
+  wireRegionActions();
+  wireFaqActions();
+  wireContactMessageActions();
+  wireOffPlatformDealActions();
+  wireToolsActions();
   wireModal();
 }
 
@@ -684,6 +1423,247 @@ function wireStaffActions() {
 function wireSettingsActions() {
   const btn = document.getElementById("save-threshold-btn");
   if (btn) btn.onclick = () => updateThreshold(document.getElementById("threshold-input").value);
+
+  const psBtn = document.getElementById("save-platform-settings-btn");
+  if (psBtn) psBtn.onclick = () => updatePlatformSettings({
+    adminCommissionType: document.getElementById("admin-commission-type").value,
+    adminCommissionValue: Number(document.getElementById("admin-commission-value").value),
+    referralCommissionType: document.getElementById("referral-commission-type").value,
+    referralCommissionValue: Number(document.getElementById("referral-commission-value").value),
+    referralMaxPayoutsPerReferredUser: Number(document.getElementById("referral-max-payouts").value),
+    connectionFeeType: document.getElementById("connection-fee-type").value,
+    connectionFeeValue: Number(document.getElementById("connection-fee-value").value),
+  });
+
+  document.querySelectorAll("[data-save-rule-value]").forEach((b) => {
+    b.onclick = () => {
+      const id = b.dataset.saveRuleValue;
+      const value = Number(document.querySelector(`[data-rule-value="${id}"]`).value);
+      upsertCommissionRule({
+        type: b.dataset.ruleType,
+        category: b.dataset.ruleCategory || null,
+        mode: b.dataset.ruleMode,
+        value,
+        minKobo: b.dataset.ruleMin ? Number(b.dataset.ruleMin) : null,
+        maxKobo: b.dataset.ruleMax ? Number(b.dataset.ruleMax) : null,
+      });
+    };
+  });
+  document.querySelectorAll("[data-delete-rule]").forEach((b) => {
+    b.onclick = () => { if (confirm("Delete this commission rule?")) deleteCommissionRule(b.dataset.deleteRule); };
+  });
+  const newRuleBtn = document.getElementById("new-commission-rule-btn");
+  if (newRuleBtn) newRuleBtn.onclick = () => openModal({
+    title: "New commission rule",
+    fields: [
+      { name: "type", label: "Type", type: "select", options: [{ value: "listing", label: "Listing" }, { value: "job", label: "Job" }, { value: "barter", label: "Barter" }, { value: "custom", label: "Custom" }] },
+      { name: "category", label: "Category (blank = default for type)" },
+      { name: "mode", label: "Mode", type: "select", options: [{ value: "flat", label: "Flat" }, { value: "percentage", label: "Percentage" }] },
+      { name: "value", label: "Value" },
+      { name: "minKobo", label: "Min (₦, optional)" },
+      { name: "maxKobo", label: "Max (₦, optional)" },
+    ],
+    submitLabel: "Create",
+    onSubmit: (v) => upsertCommissionRule({
+      type: v.type, category: v.category || null, mode: v.mode, value: Number(v.value),
+      minKobo: v.minKobo ? Math.round(Number(v.minKobo) * 100) : null,
+      maxKobo: v.maxKobo ? Math.round(Number(v.maxKobo) * 100) : null,
+    }),
+  });
+
+  document.querySelectorAll("[data-delete-tier]").forEach((b) => {
+    b.onclick = () => { if (confirm("Delete this commission tier?")) deleteCommissionTier(b.dataset.deleteTier); };
+  });
+  const newTierBtn = document.getElementById("new-commission-tier-btn");
+  if (newTierBtn) newTierBtn.onclick = () => openModal({
+    title: "New commission tier",
+    fields: [
+      { name: "type", label: "Type", type: "select", options: [{ value: "listing", label: "Listing" }, { value: "job", label: "Job" }, { value: "barter", label: "Barter" }, { value: "custom", label: "Custom" }] },
+      { name: "category", label: "Category (blank = default for type)" },
+      { name: "minAmountKobo", label: "Min amount (₦)" },
+      { name: "maxAmountKobo", label: "Max amount (₦, blank = no upper bound)" },
+      { name: "mode", label: "Mode", type: "select", options: [{ value: "flat", label: "Flat" }, { value: "percentage", label: "Percentage" }] },
+      { name: "value", label: "Value" },
+    ],
+    submitLabel: "Create",
+    onSubmit: (v) => createCommissionTier({
+      type: v.type, category: v.category || null,
+      minAmountKobo: Math.round(Number(v.minAmountKobo) * 100),
+      maxAmountKobo: v.maxAmountKobo ? Math.round(Number(v.maxAmountKobo) * 100) : null,
+      mode: v.mode, value: Number(v.value),
+    }),
+  });
+}
+
+function wireDisputeActions() {
+  document.querySelectorAll("[data-resolve-release]").forEach((b) => {
+    b.onclick = () => {
+      const [agreementId, trancheId] = b.dataset.resolveRelease.split("|");
+      openModal({
+        title: "Release to seller",
+        fields: [{ name: "reason", label: "Reason (optional)" }],
+        submitLabel: "Release",
+        onSubmit: (v) => resolveDispute(agreementId, trancheId, "release", v.reason),
+      });
+    };
+  });
+  document.querySelectorAll("[data-resolve-refund]").forEach((b) => {
+    b.onclick = () => {
+      const [agreementId, trancheId] = b.dataset.resolveRefund.split("|");
+      openModal({
+        title: "Refund buyer",
+        fields: [{ name: "reason", label: "Reason (optional)" }],
+        submitLabel: "Refund",
+        onSubmit: (v) => resolveDispute(agreementId, trancheId, "refund", v.reason),
+      });
+    };
+  });
+}
+
+function wireReportActions() {
+  document.querySelectorAll("[data-report-status]").forEach((b) => {
+    b.onclick = () => updateReportStatus(b.dataset.reportStatus, b.dataset.status);
+  });
+  document.querySelectorAll("[data-delete-listing]").forEach((b) => {
+    b.onclick = () => { if (confirm("Remove the reported post?")) deleteReportedPost(b.dataset.deleteListing); };
+  });
+}
+
+function wireModerationActions() {
+  const statusBtn = document.getElementById("mod-status-btn");
+  if (statusBtn) statusBtn.onclick = () => setUserAccountStatus(
+    document.getElementById("mod-uid").value.trim(),
+    document.getElementById("mod-status").value,
+    document.getElementById("mod-reason").value
+  );
+  const trustBtn = document.getElementById("trust-level-btn");
+  if (trustBtn) trustBtn.onclick = () => setUserTrustLevel(
+    document.getElementById("trust-uid").value.trim(),
+    document.getElementById("trust-level").value
+  );
+}
+
+function wireVerificationActions() {
+  document.querySelectorAll("[data-view-verification]").forEach((a) => {
+    a.onclick = (ev) => { ev.preventDefault(); loadVerificationDetail(a.dataset.viewVerification); };
+  });
+  const closeBtn = document.getElementById("close-verification-detail");
+  if (closeBtn) closeBtn.onclick = () => { state.verificationDetail = null; render(); };
+  document.querySelectorAll("[data-decide-verification]").forEach((b) => {
+    b.onclick = () => decideVerification(
+      state.verificationDetail.id,
+      b.dataset.decideVerification,
+      document.getElementById("verify-notes").value
+    );
+  });
+}
+
+function wireContactFlagActions() {
+  document.querySelectorAll("[data-flag-status]").forEach((b) => {
+    b.onclick = () => updateContactFlagStatus(b.dataset.flagStatus, b.dataset.status);
+  });
+}
+
+function wireBanEvasionActions() {
+  document.querySelectorAll("[data-ban-evasion-status]").forEach((b) => {
+    b.onclick = () => updateBanEvasionStatus(b.dataset.banEvasionStatus, b.dataset.status);
+  });
+}
+
+function wireCategoryActions() {
+  document.querySelectorAll("[data-toggle-category]").forEach((b) => {
+    b.onclick = () => updateCategory(b.dataset.toggleCategory, { active: b.dataset.active === "true" });
+  });
+  document.querySelectorAll("[data-delete-category]").forEach((b) => {
+    b.onclick = () => { if (confirm("Delete this category?")) deleteCategory(b.dataset.deleteCategory); };
+  });
+  const newBtn = document.getElementById("new-category-btn");
+  if (newBtn) newBtn.onclick = () => openModal({
+    title: "New category",
+    fields: [{ name: "name", label: "Name" }, { name: "iconName", label: "Icon name (optional)" }],
+    submitLabel: "Create",
+    onSubmit: (v) => createCategory({ name: v.name, iconName: v.iconName || undefined }),
+  });
+}
+
+function wireRegionActions() {
+  document.querySelectorAll("[data-toggle-region]").forEach((b) => {
+    b.onclick = () => updateRegion(b.dataset.toggleRegion, { active: b.dataset.active === "true" });
+  });
+  document.querySelectorAll("[data-delete-region]").forEach((b) => {
+    b.onclick = () => { if (confirm("Delete this region?")) deleteRegion(b.dataset.deleteRegion); };
+  });
+  const newBtn = document.getElementById("new-region-btn");
+  if (newBtn) newBtn.onclick = () => openModal({
+    title: "New region",
+    fields: [{ name: "countryCode", label: "Country code (2-letter ISO)" }, { name: "countryName", label: "Country name" }],
+    submitLabel: "Create",
+    onSubmit: (v) => createRegion({ countryCode: v.countryCode, countryName: v.countryName }),
+  });
+}
+
+function wireFaqActions() {
+  document.querySelectorAll("[data-edit-faq]").forEach((b) => {
+    b.onclick = () => openModal({
+      title: "Edit FAQ",
+      fields: [{ name: "question", label: "Question" }, { name: "answer", label: "Answer" }],
+      submitLabel: "Save",
+      onSubmit: (v) => updateFaq(b.dataset.editFaq, { question: v.question, answer: v.answer }),
+    });
+  });
+  document.querySelectorAll("[data-delete-faq]").forEach((b) => {
+    b.onclick = () => { if (confirm("Delete this FAQ?")) deleteFaq(b.dataset.deleteFaq); };
+  });
+  const newBtn = document.getElementById("new-faq-btn");
+  if (newBtn) newBtn.onclick = () => openModal({
+    title: "New FAQ",
+    fields: [{ name: "question", label: "Question" }, { name: "answer", label: "Answer" }],
+    submitLabel: "Create",
+    onSubmit: (v) => createFaq({ question: v.question, answer: v.answer }),
+  });
+}
+
+function wireContactMessageActions() {
+  document.querySelectorAll("[data-reply-message]").forEach((b) => {
+    b.onclick = () => openModal({
+      title: "Reply",
+      fields: [{ name: "reply", label: "Reply" }],
+      submitLabel: "Send",
+      onSubmit: (v) => replyToContactMessage(b.dataset.replyMessage, v.reply),
+    });
+  });
+}
+
+function wireOffPlatformDealActions() {
+  document.querySelectorAll("[data-deal-status]").forEach((b) => {
+    b.onclick = () => updateOffPlatformDealStatus(b.dataset.dealStatus, b.dataset.status);
+  });
+  document.querySelectorAll("[data-pay-reward]").forEach((b) => {
+    b.onclick = () => openModal({
+      title: "Pay reward",
+      fields: [{ name: "amount", label: "Reward amount (₦)" }],
+      submitLabel: "Pay",
+      onSubmit: (v) => payOffPlatformDealReward(b.dataset.payReward, v.amount),
+    });
+  });
+}
+
+function wireToolsActions() {
+  const bcBtn = document.getElementById("send-broadcast-btn");
+  if (bcBtn) bcBtn.onclick = () => sendBroadcast(
+    document.getElementById("bc-title").value,
+    document.getElementById("bc-body").value,
+    document.getElementById("bc-skills").value,
+    document.getElementById("bc-email").checked
+  );
+  const creditBtn = document.getElementById("credit-wallet-btn");
+  if (creditBtn) creditBtn.onclick = () => creditWallet(
+    document.getElementById("credit-uid").value.trim(),
+    document.getElementById("credit-amount").value,
+    document.getElementById("credit-reason").value
+  );
+  const pushBtn = document.getElementById("push-test-btn");
+  if (pushBtn) pushBtn.onclick = runPushDiagnosticsTest;
 }
 
 function render() {

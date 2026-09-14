@@ -306,7 +306,8 @@ app.post("/agreements/:id/tranches/:trancheId/admin-resolve", requireAuth, requi
       c.req.param("trancheId")!,
       outcome,
       user.uid,
-      reason
+      reason,
+      user.staffRole
     );
     return c.json(updated);
   } catch (err) {

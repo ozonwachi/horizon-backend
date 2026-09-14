@@ -587,7 +587,13 @@ export async function adminResolveTranche(
   trancheId: string,
   outcome: "release" | "refund",
   adminUid: string | null,
-  reason: string | null
+  reason: string | null,
+  // Workers must escalate large disputes to the owner - reuses the same
+  // configurable threshold as payout approval
+  // (platform_settings.payout_high_tier_threshold_kobo) rather than a
+  // separate number, per the admin payout design doc. null/undefined (e.g.
+  // a resolution not going through the gated admin route) skips the check.
+  resolverRole: string | null = null
 ) {
   const before = await getAgreement(supabase, agreementId);
   if (!before) throw new Error("Agreement not found");
@@ -595,6 +601,18 @@ export async function adminResolveTranche(
   const beforeTranche = before.tranches.find((t: any) => t.id === trancheId);
   if (!beforeTranche) throw new Error("Tranche not found");
   const previousTrancheStatus = beforeTranche.status;
+
+  if (resolverRole === "worker") {
+    const { data: settings } = await supabase
+      .from("platform_settings")
+      .select("payout_high_tier_threshold_kobo")
+      .eq("id", 1)
+      .maybeSingle();
+    const threshold = settings?.payout_high_tier_threshold_kobo ?? Infinity;
+    if (beforeTranche.amountKobo > threshold) {
+      throw new Error("This dispute exceeds the escalation threshold and must be resolved by the owner.");
+    }
+  }
 
   let result: Agreement;
   if (outcome === "release") {

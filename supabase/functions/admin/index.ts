@@ -82,10 +82,32 @@ app.patch("/settings", async (c) => {
   }
 });
 
+// Workers may only change an EXISTING rule's value - not create a new
+// rule, and not touch its type/category/mode/bounds. Owner has no such
+// restriction. See the commission-rates row in the admin payout design
+// doc's junior/senior scope table.
 app.put("/commission-rules", async (c) => {
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   try {
+    if (user.staffRole !== "admin") {
+      const supabase = getAdminClient();
+      let existingQuery = supabase.from("commission_rules").select("*").eq("type", body?.type);
+      existingQuery = body?.category ? existingQuery.eq("category", body.category) : existingQuery.is("category", null);
+      const { data: existingRows, error: existingError } = await existingQuery;
+      if (existingError) throw existingError;
+      const existing = existingRows && existingRows[0];
+      if (!existing) {
+        return c.json({ error: "Workers can only edit an existing commission rule's value, not create a new one" }, 403);
+      }
+      if (
+        (body?.mode !== undefined && body.mode !== existing.mode) ||
+        (body?.minKobo !== undefined && body.minKobo !== existing.min_kobo) ||
+        (body?.maxKobo !== undefined && body.maxKobo !== existing.max_kobo)
+      ) {
+        return c.json({ error: "Workers can only change a commission rule's value, not its mode or bounds" }, 403);
+      }
+    }
     const rule = await upsertCommissionRule(getAdminClient(), user.uid, body || {});
     return c.json(rule);
   } catch (err) {
@@ -94,9 +116,9 @@ app.put("/commission-rules", async (c) => {
   }
 });
 
-app.delete("/commission-rules/:id", async (c) => {
+app.delete("/commission-rules/:id", requireOwnerRole, async (c) => {
   const user = c.get("user");
-  const id = c.req.param("id");
+  const id = c.req.param("id")!;
   try {
     await deleteCommissionRule(getAdminClient(), user.uid, id);
     return c.json({ ok: true });
@@ -106,7 +128,11 @@ app.delete("/commission-rules/:id", async (c) => {
   }
 });
 
-app.post("/commission-tiers", async (c) => {
+// Tiers are inherently structural (a new amount range, or removing one) -
+// there's no "edit a tier's value in place" endpoint at all, so unlike
+// commission_rules there's no worker-safe subset of this to allow.
+// Owner-only entirely.
+app.post("/commission-tiers", requireOwnerRole, async (c) => {
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   try {
@@ -118,7 +144,7 @@ app.post("/commission-tiers", async (c) => {
   }
 });
 
-app.delete("/commission-tiers/:id", async (c) => {
+app.delete("/commission-tiers/:id", requireOwnerRole, async (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
   try {
@@ -197,9 +223,9 @@ app.post("/users/:uid/status", async (c) => {
 // Requested feature: grant/revoke the 'trusted_business' trust tier from
 // the Admin Dashboard - previously nothing (UI or RPC) could ever set it,
 // so it was a dead tier despite existing in the schema.
-app.post("/users/:uid/trust-level", async (c) => {
+app.post("/users/:uid/trust-level", requireOwnerRole, async (c) => {
   const admin = c.get("user");
-  const uid = c.req.param("uid");
+  const uid = c.req.param("uid")!;
   const body = await c.req.json().catch(() => ({}));
   try {
     const result = await setTrustLevel(getAdminClient(), admin.uid, uid, body?.trustLevel);
