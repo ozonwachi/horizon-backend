@@ -29,6 +29,7 @@ export const TYPES = {
   DEPOSIT: "deposit", // Paystack top-up landing in the wallet
   WITHDRAWAL: "withdrawal", // payout request debiting the wallet
   WITHDRAWAL_REJECTED: "withdrawal_rejected", // rejected request crediting it back
+  WITHDRAWAL_FAILED: "withdrawal_failed", // automatic Paystack transfer failed/reversed, crediting it back
   ADMIN_FORCE_CANCEL: "admin_force_cancel", // a force-cancel split decision
   CONNECTION_FEE: "connection_fee", // a user self-declaring/paying a fee for a deal taken off-platform
   ADMIN_CREDIT: "admin_credit", // an admin manually crediting a user's wallet

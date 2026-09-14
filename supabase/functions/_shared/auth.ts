@@ -5,6 +5,7 @@ export type AuthedUser = {
   uid: string;
   email: string | null;
   isAdmin: boolean;
+  staffRole: string | null;
   accountStatus: string;
   // Security: admin 2FA (Supabase native TOTP MFA). `aal` is this
   // session's current Authenticator Assurance Level, read straight off the
@@ -80,7 +81,7 @@ export async function requireAuth(c: AppContext, next: Next) {
     // cost every other handler already pays reading its own data.
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
-      .select("is_admin, account_status")
+      .select("is_admin, staff_role, account_status")
       .eq("uid", uid)
       .maybeSingle();
     if (profileError) throw profileError;
@@ -105,6 +106,7 @@ export async function requireAuth(c: AppContext, next: Next) {
       uid,
       email: data.user.email ?? null,
       isAdmin: profile?.is_admin === true,
+      staffRole: profile?.staff_role ?? null,
       accountStatus,
       aal: decodeAalFromJwt(token),
       hasVerifiedMfaFactor,
@@ -119,22 +121,33 @@ export async function requireAuth(c: AppContext, next: Next) {
 
 // Must run after requireAuth (needs the user context var it sets).
 //
-// Security fix: admin 2FA. Once an admin account has enrolled a verified
-// TOTP factor, every admin route requires the session to actually be at
-// AAL2 (i.e. the MFA challenge was completed, not just password sign-in) -
-// closes the gap where enrolling MFA in the app was purely cosmetic and a
-// stolen password alone still fully worked. Deliberately opt-in rather
-// than mandatory for every admin: an admin who hasn't enrolled a factor
-// yet can still use their account (the Flutter app should nag them to set
-// one up, not lock them out for not having one - see
-// AdminMfaSetupScreen). MFA_REQUIRED is a distinct error code so the
-// client can tell "you're not an admin" apart from "step up to aal2".
+// Security: admin 2FA is now MANDATORY, not opt-in. Every admin route
+// requires the session to actually be at AAL2 (i.e. an MFA challenge was
+// completed this session, not just password sign-in) - this is the admin
+// payout dashboard's gate (see [[prexpa-admin-payout-design]]), and this
+// system approves real money leaving the platform, so an admin who hasn't
+// enrolled a TOTP factor at all is blocked outright rather than let
+// through - there's nothing to challenge for aal2 if no factor exists, so
+// NO_MFA_ENROLLED is a distinct code telling the client to send them to
+// enrollment, not just retry a challenge. MFA_REQUIRED (factor exists,
+// this session just hasn't stepped up yet) is kept as its own code for the
+// same reason as before: the client can tell "go enroll" apart from "step
+// up this session" apart from "you're not an admin".
 export async function requireAdmin(c: AppContext, next: Next) {
   const user = c.get("user");
   if (!user?.isAdmin) {
     return c.json({ error: "Admin access required" }, 403);
   }
-  if (user.hasVerifiedMfaFactor && user.aal !== "aal2") {
+  if (!user.hasVerifiedMfaFactor) {
+    return c.json(
+      {
+        error: "This admin account must enroll two-factor authentication before it can be used.",
+        code: "NO_MFA_ENROLLED",
+      },
+      401
+    );
+  }
+  if (user.aal !== "aal2") {
     return c.json(
       {
         error: "This admin account requires 2FA verification for this session.",
@@ -142,6 +155,18 @@ export async function requireAdmin(c: AppContext, next: Next) {
       },
       401
     );
+  }
+  await next();
+}
+
+// Must run after requireAdmin. Gates the owner-only surface (staff
+// management, payout approval-tier thresholds) - see the
+// junior/senior-scope table in the payout design doc, now expressed as
+// staff_role = 'admin' (owner) vs 'worker'.
+export async function requireOwnerRole(c: AppContext, next: Next) {
+  const user = c.get("user");
+  if (user?.staffRole !== "admin") {
+    return c.json({ error: "Owner access required" }, 403);
   }
   await next();
 }

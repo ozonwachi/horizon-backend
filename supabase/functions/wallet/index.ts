@@ -6,6 +6,7 @@ import * as walletService from "../_shared/walletService.ts";
 import { getSettings } from "../_shared/platformSettingsService.ts";
 import * as otpService from "../_shared/otpService.ts";
 import { rateLimitOrRespond } from "../_shared/rateLimitService.ts";
+import { listBanks } from "../_shared/paystackService.ts";
 
 // Ported from src/routes/wallet.js.
 const app = new Hono<AppEnv>().basePath("/wallet");
@@ -222,15 +223,77 @@ app.get("/admin/withdrawals", requireAdmin, async (c) => {
   }
 });
 
-app.post("/admin/withdrawals/:id/mark-paid", requireAdmin, async (c) => {
+// Records the caller's approval; if the withdrawal's tier requirement is
+// now satisfied (see wallet_approve_withdrawal), status flips to
+// 'approved' and the response reflects that. <= threshold: any 1 admin.
+// > threshold: 1 owner approval, or 2 distinct worker approvals.
+app.post("/admin/withdrawals/:id/approve", requireAdmin, async (c) => {
   const admin = c.get("user");
   const id = c.req.param("id")!;
   try {
-    const updated = await walletService.markWithdrawalPaid(getAdminClient(), id, admin.uid);
+    const updated = await walletService.approveWithdrawal(getAdminClient(), id, admin.uid);
     return c.json(updated);
   } catch (err) {
-    console.error("Mark withdrawal paid failed:", err);
+    console.error("Approve withdrawal failed:", err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.get("/admin/withdrawals/:id/approvals", requireAdmin, async (c) => {
+  const id = c.req.param("id")!;
+  try {
+    const approvals = await walletService.listApprovalsForWithdrawal(getAdminClient(), id);
+    return c.json(approvals);
+  } catch (err) {
+    console.error("List withdrawal approvals failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+// Execution, manual path: an admin already paid this by hand outside the
+// app and is recording the reference/note. Requires status='approved'.
+app.post("/admin/withdrawals/:id/execute-manual", requireAdmin, async (c) => {
+  const admin = c.get("user");
+  const id = c.req.param("id")!;
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    const updated = await walletService.executeWithdrawalManual(getAdminClient(), id, body?.reference, admin.uid);
+    return c.json(updated);
+  } catch (err) {
+    console.error("Execute withdrawal (manual) failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+// Execution, automatic path: bankCode must be a real Paystack bank code
+// (see GET /admin/banks) the admin has confirmed against this request's
+// bank_name/account_number - never resolved automatically from the
+// free-text bank name. Requires status='approved'; starts a real Paystack
+// transfer and moves to 'processing' - the transfer.success/failed webhook
+// resolves it to 'paid'/'failed'.
+app.post("/admin/withdrawals/:id/execute-automatic", requireAdmin, async (c) => {
+  const admin = c.get("user");
+  const id = c.req.param("id")!;
+  const body = await c.req.json().catch(() => ({}));
+  if (!body?.bankCode) return c.json({ error: "bankCode is required" }, 400);
+  try {
+    const updated = await walletService.executeWithdrawalAutomatic(getAdminClient(), id, body.bankCode, admin.uid);
+    return c.json(updated);
+  } catch (err) {
+    console.error("Execute withdrawal (automatic) failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+// Paystack's real bank list (name + code), for the dashboard's bank picker
+// on the automatic execution path.
+app.get("/admin/banks", requireAdmin, async (c) => {
+  try {
+    const banks = await listBanks();
+    return c.json(banks);
+  } catch (err) {
+    console.error("List banks failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
 });
 

@@ -2,7 +2,7 @@ import { Hono } from "npm:hono@4";
 import { getAdminClient } from "../_shared/supabaseAdmin.ts";
 import { verifyWebhookSignature } from "../_shared/paystackService.ts";
 import { markFunded } from "../_shared/escrowService.ts";
-import { confirmDeposit } from "../_shared/walletService.ts";
+import { confirmDeposit, completeWithdrawalTransfer, failWithdrawalTransfer } from "../_shared/walletService.ts";
 import { runInBackground } from "../_shared/backgroundTask.ts";
 
 // Ported from src/routes/paystackWebhook.js. Public - Paystack has no
@@ -60,6 +60,27 @@ async function processEvent(event: any): Promise<void> {
       } else if (metadata && metadata.type === "wallet_deposit" && metadata.uid) {
         await confirmDeposit(supabase, { uid: metadata.uid, amountKobo: amount, reference });
         console.log(`Wallet deposit credited for ${metadata.uid} (${reference})`);
+      }
+    } else if (event.event === "transfer.success") {
+      const { reference } = event.data;
+      const supabase = getAdminClient();
+      try {
+        await completeWithdrawalTransfer(supabase, reference);
+        console.log(`Withdrawal transfer completed via webhook (${reference})`);
+      } catch (err) {
+        // Idempotency: a retried webhook delivery after the first one
+        // already completed this (status no longer 'processing') lands
+        // here too - log and move on rather than treat it as a failure.
+        console.warn(`transfer.success webhook for ${reference} was a no-op:`, err instanceof Error ? err.message : err);
+      }
+    } else if (event.event === "transfer.failed" || event.event === "transfer.reversed") {
+      const { reference, reason } = event.data;
+      const supabase = getAdminClient();
+      try {
+        await failWithdrawalTransfer(supabase, reference, reason || event.event);
+        console.log(`Withdrawal transfer failed via webhook (${reference})`);
+      } catch (err) {
+        console.warn(`${event.event} webhook for ${reference} was a no-op:`, err instanceof Error ? err.message : err);
       }
     }
   } catch (err) {

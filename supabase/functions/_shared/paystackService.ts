@@ -92,6 +92,22 @@ export async function initiateTransfer({
   return data.data;
 }
 
+// Paystack's real bank list (name + code) - used by the admin dashboard to
+// resolve a withdrawal's free-text bank_name to the actual code
+// createTransferRecipient needs, via an admin picking/confirming the right
+// entry rather than the backend fuzzy-matching a name automatically.
+export async function listBanks() {
+  const res = await fetch(`${PAYSTACK_BASE_URL}/bank?currency=NGN`, {
+    headers: { Authorization: `Bearer ${getSecretKey()}` },
+  });
+
+  const data = await res.json();
+  if (!res.ok || !data.status) {
+    throw new Error(data.message || "Paystack bank list failed");
+  }
+  return data.data as { name: string; code: string; slug: string }[];
+}
+
 export async function createTransferRecipient({
   name,
   accountNumber,

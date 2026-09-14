@@ -7,11 +7,20 @@ import { recordAuditLog } from "./auditLogService.ts";
 
 const WALLETS_TABLE = "wallets";
 const WITHDRAWALS_TABLE = "withdrawal_requests";
+const WITHDRAWAL_APPROVALS_TABLE = "withdrawal_approvals";
 
+// pending -> approved (tier's approval requirement met) -> paid (manual) or
+// processing -> paid/failed (automatic, via Paystack transfer webhook).
+// pending/approved -> rejected any time before execution. See
+// wallet_approve_withdrawal/wallet_execute_withdrawal_manual/
+// wallet_start_withdrawal_transfer in migration_36.
 export const WithdrawalStatus = {
   PENDING: "pending",
+  APPROVED: "approved",
+  PROCESSING: "processing",
   PAID: "paid",
   REJECTED: "rejected",
+  FAILED: "failed",
 } as const;
 
 export type WithdrawalRequest = {
@@ -23,10 +32,24 @@ export type WithdrawalRequest = {
   accountName: string;
   status: string;
   createdAt: string;
+  approvedAt: string | null;
+  paidAt: string | null;
   rejectionReason: string | null;
+  executionMethod: string | null;
+  paystackTransferCode: string | null;
+  paystackTransferReference: string | null;
 };
 
-// Row -> the camelCase shape WithdrawalRequest.fromJson (Flutter) expects.
+export type WithdrawalApproval = {
+  id: string;
+  withdrawalRequestId: string;
+  approverUid: string;
+  approverRole: string;
+  approvedAt: string;
+};
+
+// Row -> the camelCase shape WithdrawalRequest.fromJson (Flutter/dashboard)
+// expects.
 // deno-lint-ignore no-explicit-any
 function toWithdrawalRequest(row: any): WithdrawalRequest {
   return {
@@ -38,7 +61,23 @@ function toWithdrawalRequest(row: any): WithdrawalRequest {
     accountName: row.account_name,
     status: row.status,
     createdAt: row.created_at,
+    approvedAt: row.approved_at,
+    paidAt: row.paid_at,
     rejectionReason: row.rejection_reason,
+    executionMethod: row.execution_method,
+    paystackTransferCode: row.paystack_transfer_code,
+    paystackTransferReference: row.paystack_transfer_reference,
+  };
+}
+
+// deno-lint-ignore no-explicit-any
+function toWithdrawalApproval(row: any): WithdrawalApproval {
+  return {
+    id: row.id,
+    withdrawalRequestId: row.withdrawal_request_id,
+    approverUid: row.approver_uid,
+    approverRole: row.approver_role,
+    approvedAt: row.approved_at,
   };
 }
 
@@ -241,26 +280,73 @@ export async function listAllWithdrawalsAdmin(supabase: SupabaseClient, limit = 
   return (data || []).map(toWithdrawalRequest);
 }
 
-export async function markWithdrawalPaid(
+// Records one approval and, if the withdrawal's tier requirement is now
+// met (see wallet_approve_withdrawal in migration_36 for the exact tier
+// math), flips pending -> approved. Idempotent against double-approval by
+// the same admin (the RPC raises a clear error) and re-validates the
+// approver's own admin/role/account-status fresh in the same transaction
+// rather than trusting the caller.
+export async function approveWithdrawal(
   supabase: SupabaseClient,
   requestId: string,
-  adminUid: string
+  approverUid: string
 ): Promise<WithdrawalRequest> {
-  const { data: row, error } = await supabase.rpc("wallet_mark_withdrawal_paid", {
+  const { data: row, error } = await supabase.rpc("wallet_approve_withdrawal", {
     p_request_id: requestId,
+    p_approver_uid: approverUid,
   });
   if (error) throw new Error(error.message);
   const updated = toWithdrawalRequest(row);
 
-  // Security fix: this was previously a real money-moving admin action with
-  // no audit trail at all - every other admin override records one.
   await recordAuditLog(supabase, {
-    userId: adminUid,
-    action: "withdrawal_marked_paid",
+    userId: approverUid,
+    action: updated.status === "approved" ? "withdrawal_approval_completed" : "withdrawal_approval_recorded",
     targetType: "withdrawal_request",
     targetId: requestId,
-    newValue: { amountKobo: updated.amountKobo, uid: updated.uid },
-  }).catch((err) => console.error("recordAuditLog (withdrawal_marked_paid) failed:", err));
+    newValue: { amountKobo: updated.amountKobo, uid: updated.uid, status: updated.status },
+  }).catch((err) => console.error("recordAuditLog (withdrawal_approve) failed:", err));
+
+  return updated;
+}
+
+export async function listApprovalsForWithdrawal(
+  supabase: SupabaseClient,
+  requestId: string
+): Promise<WithdrawalApproval[]> {
+  const { data, error } = await supabase
+    .from(WITHDRAWAL_APPROVALS_TABLE)
+    .select("*")
+    .eq("withdrawal_request_id", requestId)
+    .order("approved_at", { ascending: true });
+  if (error) throw error;
+  return (data || []).map(toWithdrawalApproval);
+}
+
+// Execution, manual path: an admin already paid this by hand outside the
+// app and is recording the reference/note for the audit trail. Requires
+// status='approved' - a withdrawal can no longer be marked paid straight
+// from 'pending' (see migration_36's comment on why the old
+// wallet_mark_withdrawal_paid was a bypass).
+export async function executeWithdrawalManual(
+  supabase: SupabaseClient,
+  requestId: string,
+  reference: string | null | undefined,
+  adminUid: string
+): Promise<WithdrawalRequest> {
+  const { data: row, error } = await supabase.rpc("wallet_execute_withdrawal_manual", {
+    p_request_id: requestId,
+    p_reference: reference || null,
+  });
+  if (error) throw new Error(error.message);
+  const updated = toWithdrawalRequest(row);
+
+  await recordAuditLog(supabase, {
+    userId: adminUid,
+    action: "withdrawal_executed_manual",
+    targetType: "withdrawal_request",
+    targetId: requestId,
+    newValue: { amountKobo: updated.amountKobo, uid: updated.uid, reference: reference || null },
+  }).catch((err) => console.error("recordAuditLog (withdrawal_executed_manual) failed:", err));
 
   await notifyUser(supabase, updated.uid, {
     type: "withdrawal_paid",
@@ -270,6 +356,117 @@ export async function markWithdrawalPaid(
     relatedId: requestId,
     important: true,
   }).catch((err) => console.error("notifyUser (withdrawal_paid) failed:", err));
+
+  return updated;
+}
+
+// Execution, automatic path: creates a Paystack transfer recipient (the
+// bank code is resolved/confirmed by the admin dashboard against
+// Paystack's real bank list, never fuzz-matched from the free-text
+// bank_name already on file - see listBanks below), starts the transfer,
+// then records approved -> processing. The transfer itself is
+// fire-and-confirm: wallet_complete_withdrawal_transfer /
+// wallet_fail_withdrawal_transfer (called from the transfer.success /
+// transfer.failed webhook) are what actually resolve processing -> paid or
+// failed.
+export async function executeWithdrawalAutomatic(
+  supabase: SupabaseClient,
+  requestId: string,
+  bankCode: string,
+  adminUid: string
+): Promise<WithdrawalRequest> {
+  const { data: row, error: fetchError } = await supabase
+    .from(WITHDRAWALS_TABLE)
+    .select("*")
+    .eq("id", requestId)
+    .single();
+  if (fetchError) throw fetchError;
+  const request = toWithdrawalRequest(row);
+  if (request.status !== "approved") {
+    throw new Error(`Cannot execute a request with status "${request.status}" - it must be approved first`);
+  }
+
+  const recipient = await paystackService.createTransferRecipient({
+    name: request.accountName,
+    accountNumber: request.accountNumber,
+    bankCode,
+  });
+
+  const reference = `horizon_withdrawal_${requestId}`;
+  await paystackService.initiateTransfer({
+    amountKobo: request.amountKobo,
+    recipientCode: recipient.recipient_code,
+    reason: `Prexpa withdrawal payout`,
+    reference,
+  });
+
+  const { data: startedRow, error: startError } = await supabase.rpc("wallet_start_withdrawal_transfer", {
+    p_request_id: requestId,
+    p_transfer_code: recipient.recipient_code,
+    p_transfer_reference: reference,
+  });
+  if (startError) throw new Error(startError.message);
+  const updated = toWithdrawalRequest(startedRow);
+
+  await recordAuditLog(supabase, {
+    userId: adminUid,
+    action: "withdrawal_execution_started_automatic",
+    targetType: "withdrawal_request",
+    targetId: requestId,
+    newValue: { amountKobo: updated.amountKobo, uid: updated.uid, transferReference: reference },
+  }).catch((err) => console.error("recordAuditLog (withdrawal_execution_started_automatic) failed:", err));
+
+  return updated;
+}
+
+// Paystack transfer.success webhook. Not an admin action (no human actor),
+// so - consistent with confirmDeposit/markFunded elsewhere in this file -
+// this doesn't write an audit_logs row; the withdrawal_requests row itself
+// (status/paystack_transfer_reference/paid_at) is the record.
+export async function completeWithdrawalTransfer(
+  supabase: SupabaseClient,
+  transferReference: string
+): Promise<WithdrawalRequest> {
+  const { data: row, error } = await supabase.rpc("wallet_complete_withdrawal_transfer", {
+    p_transfer_reference: transferReference,
+  });
+  if (error) throw new Error(error.message);
+  const updated = toWithdrawalRequest(row);
+
+  await notifyUser(supabase, updated.uid, {
+    type: "withdrawal_paid",
+    title: "Withdrawal paid",
+    body: `Your ₦${(updated.amountKobo / 100).toFixed(2)} withdrawal to ${updated.bankName} has been paid.`,
+    relatedType: "withdrawal",
+    relatedId: updated.id,
+    important: true,
+  }).catch((err) => console.error("notifyUser (withdrawal_paid, transfer webhook) failed:", err));
+
+  return updated;
+}
+
+// Paystack transfer.failed / transfer.reversed webhook. Credits the
+// already-debited amount back to the payee's wallet.
+export async function failWithdrawalTransfer(
+  supabase: SupabaseClient,
+  transferReference: string,
+  reason: string | null
+): Promise<WithdrawalRequest> {
+  const { data: row, error } = await supabase.rpc("wallet_fail_withdrawal_transfer", {
+    p_transfer_reference: transferReference,
+    p_reason: reason,
+  });
+  if (error) throw new Error(error.message);
+  const updated = toWithdrawalRequest(row);
+
+  await notifyUser(supabase, updated.uid, {
+    type: "withdrawal_failed",
+    title: "Withdrawal failed",
+    body: `Your ₦${(updated.amountKobo / 100).toFixed(2)} withdrawal to ${updated.bankName} failed and has been credited back to your wallet.`,
+    relatedType: "withdrawal",
+    relatedId: updated.id,
+    important: true,
+  }).catch((err) => console.error("notifyUser (withdrawal_failed, transfer webhook) failed:", err));
 
   return updated;
 }

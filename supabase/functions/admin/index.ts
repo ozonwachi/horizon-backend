@@ -1,7 +1,8 @@
 import { Hono } from "npm:hono@4";
 import { cors } from "npm:hono@4/cors";
 import { getAdminClient } from "../_shared/supabaseAdmin.ts";
-import { requireAuth, requireAdmin, type AppEnv } from "../_shared/auth.ts";
+import { requireAuth, requireAdmin, requireOwnerRole, type AppEnv } from "../_shared/auth.ts";
+import { listStaff, grantStaffRole, revokeStaffRole } from "../_shared/adminManagementService.ts";
 import {
   getSettings,
   listCommissionRules,
@@ -66,6 +67,12 @@ app.get("/settings", async (c) => {
 app.patch("/settings", async (c) => {
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
+  // Payout approval-tier threshold is owner-only (see the junior/senior
+  // scope table in the payout design doc) - every other settings field
+  // stays available to any admin, as before.
+  if (body?.payoutHighTierThresholdKobo !== undefined && user.staffRole !== "admin") {
+    return c.json({ error: "Owner access required to change the payout approval-tier threshold" }, 403);
+  }
   try {
     const settings = await updateSettings(getAdminClient(), user.uid, body || {});
     return c.json(settings);
@@ -633,6 +640,44 @@ app.post("/push-diagnostics/test", async (c) => {
   } catch (err) {
     console.error("Push diagnostics failed:", err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+// Staff management - owner-only (staff_role='admin'). There's no separate
+// "create an admin" flow: every account already exists via normal signup,
+// this just grants/revokes staff standing on one.
+app.get("/staff", requireOwnerRole, async (c) => {
+  try {
+    const staff = await listStaff(getAdminClient());
+    return c.json(staff);
+  } catch (err) {
+    console.error("List staff failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.post("/staff/:uid/grant", requireOwnerRole, async (c) => {
+  const admin = c.get("user");
+  const targetUid = c.req.param("uid")!;
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    const staff = await grantStaffRole(getAdminClient(), { targetUid, role: body?.role, actorUid: admin.uid });
+    return c.json(staff);
+  } catch (err) {
+    console.error("Grant staff role failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.post("/staff/:uid/revoke", requireOwnerRole, async (c) => {
+  const admin = c.get("user");
+  const targetUid = c.req.param("uid")!;
+  try {
+    await revokeStaffRole(getAdminClient(), { targetUid, actorUid: admin.uid });
+    return c.json({ ok: true });
+  } catch (err) {
+    console.error("Revoke staff role failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
   }
 });
 
