@@ -1,0 +1,707 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>Prexpa Staff</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1f232c;
+    --border: #2a2f3a;
+    --text: #e6e8eb;
+    --muted: #9aa1ac;
+    --accent: #4f8cff;
+    --danger: #e5484d;
+    --ok: #2fb36c;
+    --warn: #e0a72d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px;
+  }
+  #app { max-width: 1000px; margin: 0 auto; padding: 24px 16px 80px; }
+  .center-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    width: 100%;
+    max-width: 380px;
+  }
+  .card h1 { font-size: 18px; margin: 0 0 4px; }
+  .card p.sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+  input, select, textarea {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 9px 10px;
+    font-size: 14px;
+  }
+  input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); }
+  button {
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+  button.ok { background: var(--ok); border-color: var(--ok); color: #fff; }
+  button.full { width: 100%; margin-top: 18px; padding: 10px; }
+  .error { color: var(--danger); font-size: 13px; margin-top: 10px; min-height: 16px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  header.top {
+    display: flex; align-items: center; justify-content: space-between;
+    padding-bottom: 16px; margin-bottom: 20px; border-bottom: 1px solid var(--border);
+  }
+  header.top .who { font-size: 12px; color: var(--muted); }
+  nav.tabs { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; }
+  nav.tabs button { background: var(--panel); }
+  nav.tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+  .badge.pending { background: #3a3320; color: var(--warn); }
+  .badge.approved { background: #1f2f45; color: var(--accent); }
+  .badge.processing { background: #1f2f45; color: var(--accent); }
+  .badge.paid { background: #163a29; color: var(--ok); }
+  .badge.rejected { background: #3a1f22; color: var(--danger); }
+  .badge.failed { background: #3a1f22; color: var(--danger); }
+  .row-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .muted { color: var(--muted); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 20px; }
+  .panel h2 { font-size: 14px; margin: 0 0 14px; }
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,.55);
+    display: flex; align-items: center; justify-content: center; z-index: 50; padding: 16px;
+  }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; max-width: 420px; width: 100%; }
+  .modal h3 { margin: 0 0 14px; font-size: 15px; }
+  .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 16px; font-size: 13px; z-index: 100;
+  }
+  .toast.error { border-color: var(--danger); color: var(--danger); }
+  .toast.ok { border-color: var(--ok); color: var(--ok); }
+  .qr-box { background: #fff; padding: 12px; border-radius: 8px; display: inline-block; margin: 12px 0; }
+  .qr-box img { display: block; width: 180px; height: 180px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; color: var(--muted); }
+  .staff-list-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .approvals-line { font-size: 12px; color: var(--muted); margin-top: 4px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Prexpa Staff dashboard. Private, unlinked, noindex - never bundled into
+// the mobile app. Every real decision (who's admin, who's owner, MFA state)
+// is enforced by the backend on every request; this page is just a thin
+// client over supabase-js (auth/MFA) + the horizon-backend-fresh edge
+// functions. No secrets live here - only the public anon key, same as the
+// Flutter app ships with.
+// ---------------------------------------------------------------------------
+
+const SUPABASE_URL = "https://yphohlkfpaezuxcbxtnh.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlwaG9obGtmcGFlenV4Y2J4dG5oIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc2NDgzOTIsImV4cCI6MjEwMzIyNDM5Mn0.ZA0OFflXW0OYjzQwCwaQBtoWAJWy5TJVBnX9YlYHIVU";
+const FUNCTIONS_BASE = SUPABASE_URL + "/functions/v1";
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const app = document.getElementById("app");
+
+const state = {
+  view: "loading", // loading | login | mfa-enroll | mfa-challenge | dashboard
+  tab: "withdrawals", // withdrawals | staff | settings
+  session: null,
+  isOwner: false,
+  error: null,
+  enroll: null, // { factorId, qrSvg, secret }
+  challengeFactorId: null,
+  withdrawals: [],
+  approvalsByRequest: {}, // requestId -> [approvals]
+  staff: [],
+  settings: null,
+  busy: false,
+};
+
+function toNaira(kobo) {
+  return "₦" + (Number(kobo || 0) / 100).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+let toastTimer = null;
+function toast(message, kind) {
+  clearTimeout(toastTimer);
+  let el = document.getElementById("toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "toast";
+    document.body.appendChild(el);
+  }
+  el.className = "toast " + (kind || "");
+  el.textContent = message;
+  toastTimer = setTimeout(() => el.remove(), 4500);
+}
+
+async function apiFetch(path, options) {
+  options = options || {};
+  const { data } = await sb.auth.getSession();
+  const token = data && data.session ? data.session.access_token : null;
+  const res = await fetch(FUNCTIONS_BASE + path, {
+    method: options.method || "GET",
+    headers: Object.assign(
+      {
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": "Bearer " + token,
+      },
+      options.headers || {}
+    ),
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  let body = null;
+  try { body = await res.json(); } catch (_) { /* no body */ }
+  if (!res.ok) {
+    const err = new Error((body && body.error) || ("Request failed (" + res.status + ")"));
+    err.code = body && body.code;
+    err.status = res.status;
+    throw err;
+  }
+  return body;
+}
+
+// ---------------------------------------------------------------------------
+// Auth / MFA
+// ---------------------------------------------------------------------------
+
+async function refreshAuthState() {
+  const { data: sessionData } = await sb.auth.getSession();
+  const session = sessionData && sessionData.session;
+  if (!session) {
+    state.view = "login";
+    render();
+    return;
+  }
+  state.session = session;
+
+  const { data: aal, error: aalErr } = await sb.auth.mfa.getAuthenticatorAssuranceLevel();
+  if (aalErr) { state.error = aalErr.message; state.view = "login"; render(); return; }
+
+  if (aal.nextLevel === "aal2" && aal.currentLevel !== "aal2") {
+    // A verified factor exists but this session hasn't stepped up yet.
+    const { data: factorsData } = await sb.auth.mfa.listFactors();
+    const factor = (factorsData && factorsData.totp && factorsData.totp[0]) || null;
+    state.challengeFactorId = factor ? factor.id : null;
+    state.view = "mfa-challenge";
+    render();
+    return;
+  }
+
+  const { data: factorsData2 } = await sb.auth.mfa.listFactors();
+  const hasVerifiedFactor = factorsData2 && factorsData2.totp && factorsData2.totp.length > 0;
+  if (!hasVerifiedFactor) {
+    state.view = "mfa-enroll";
+    render();
+    return;
+  }
+
+  await enterDashboard();
+}
+
+async function enterDashboard() {
+  state.view = "dashboard";
+  // Owner-ness is whatever the backend says it is (staffRole via /admin/staff
+  // will 403 for a worker) - we optimistically try it and fall back.
+  try {
+    await loadStaff();
+    state.isOwner = true;
+  } catch (_) {
+    state.isOwner = false;
+  }
+  await loadWithdrawals();
+  render();
+}
+
+async function doLogin(email, password) {
+  state.busy = true; state.error = null; render();
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  state.busy = false;
+  if (error) { state.error = error.message; render(); return; }
+  await refreshAuthState();
+}
+
+async function startEnroll() {
+  state.busy = true; state.error = null; render();
+  const { data, error } = await sb.auth.mfa.enroll({ factorType: "totp" });
+  state.busy = false;
+  if (error) { state.error = error.message; render(); return; }
+  state.enroll = { factorId: data.id, qrSvg: data.totp.qr_code, secret: data.totp.secret };
+  render();
+}
+
+async function verifyEnroll(code) {
+  state.busy = true; state.error = null; render();
+  const { data: ch, error: chErr } = await sb.auth.mfa.challenge({ factorId: state.enroll.factorId });
+  if (chErr) { state.busy = false; state.error = chErr.message; render(); return; }
+  const { error: vErr } = await sb.auth.mfa.verify({ factorId: state.enroll.factorId, challengeId: ch.id, code });
+  state.busy = false;
+  if (vErr) { state.error = vErr.message; render(); return; }
+  state.enroll = null;
+  await refreshAuthState();
+}
+
+async function verifyChallenge(code) {
+  state.busy = true; state.error = null; render();
+  const { data: ch, error: chErr } = await sb.auth.mfa.challenge({ factorId: state.challengeFactorId });
+  if (chErr) { state.busy = false; state.error = chErr.message; render(); return; }
+  const { error: vErr } = await sb.auth.mfa.verify({ factorId: state.challengeFactorId, challengeId: ch.id, code });
+  state.busy = false;
+  if (vErr) { state.error = vErr.message; render(); return; }
+  await refreshAuthState();
+}
+
+async function signOut() {
+  await sb.auth.signOut();
+  Object.assign(state, { session: null, isOwner: false, withdrawals: [], staff: [], settings: null, view: "login" });
+  render();
+}
+
+// ---------------------------------------------------------------------------
+// Data loading
+// ---------------------------------------------------------------------------
+
+async function loadWithdrawals() {
+  state.withdrawals = await apiFetch("/wallet/admin/withdrawals");
+}
+
+async function loadApprovals(requestId) {
+  const approvals = await apiFetch("/wallet/admin/withdrawals/" + requestId + "/approvals");
+  state.approvalsByRequest[requestId] = approvals;
+  render();
+}
+
+async function loadStaff() {
+  state.staff = await apiFetch("/admin/staff");
+}
+
+async function loadSettings() {
+  const s = await apiFetch("/admin/settings");
+  state.settings = s.settings;
+}
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+
+async function approveWithdrawal(id) {
+  try {
+    await apiFetch("/wallet/admin/withdrawals/" + id + "/approve", { method: "POST" });
+    toast("Approval recorded.", "ok");
+    await loadWithdrawals();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function rejectWithdrawal(id, reason) {
+  try {
+    await apiFetch("/wallet/admin/withdrawals/" + id + "/reject", { method: "POST", body: { reason } });
+    toast("Withdrawal rejected.", "ok");
+    await loadWithdrawals();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function executeManual(id, reference) {
+  try {
+    await apiFetch("/wallet/admin/withdrawals/" + id + "/execute-manual", { method: "POST", body: { reference } });
+    toast("Marked paid.", "ok");
+    await loadWithdrawals();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function executeAutomatic(id, bankCode) {
+  try {
+    await apiFetch("/wallet/admin/withdrawals/" + id + "/execute-automatic", { method: "POST", body: { bankCode } });
+    toast("Transfer started - awaiting Paystack confirmation.", "ok");
+    await loadWithdrawals();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function grantStaff(uid, role) {
+  try {
+    await apiFetch("/admin/staff/" + uid + "/grant", { method: "POST", body: { role } });
+    toast("Staff role granted.", "ok");
+    await loadStaff();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function revokeStaff(uid) {
+  try {
+    await apiFetch("/admin/staff/" + uid + "/revoke", { method: "POST" });
+    toast("Staff access revoked.", "ok");
+    await loadStaff();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function updateThreshold(nairaValue) {
+  try {
+    const kobo = Math.round(Number(nairaValue) * 100);
+    await apiFetch("/admin/settings", { method: "PATCH", body: { payoutHighTierThresholdKobo: kobo } });
+    toast("Threshold updated.", "ok");
+    await loadSettings();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+// ---------------------------------------------------------------------------
+// Modal (used for reject-reason / manual-reference / bank-pick prompts)
+// ---------------------------------------------------------------------------
+
+let modalState = null; // { title, fields: [{name,label,type}], onSubmit(values) }
+
+function openModal(cfg) { modalState = cfg; render(); }
+function closeModal() { modalState = null; render(); }
+
+function renderModal() {
+  if (!modalState) return "";
+  const fieldsHtml = modalState.fields.map((f) => {
+    if (f.type === "select") {
+      const opts = f.options.map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join("");
+      return `<label>${escapeHtml(f.label)}</label><select data-field="${f.name}">${opts}</select>`;
+    }
+    return `<label>${escapeHtml(f.label)}</label><input data-field="${f.name}" type="text" placeholder="${escapeHtml(f.placeholder || "")}" />`;
+  }).join("");
+  return `
+    <div class="modal-backdrop" id="modal-backdrop">
+      <div class="modal">
+        <h3>${escapeHtml(modalState.title)}</h3>
+        ${fieldsHtml}
+        <div class="error" id="modal-error"></div>
+        <div class="actions">
+          <button id="modal-cancel">Cancel</button>
+          <button class="primary" id="modal-submit">${escapeHtml(modalState.submitLabel || "Submit")}</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function wireModal() {
+  const backdrop = document.getElementById("modal-backdrop");
+  if (!backdrop) return;
+  document.getElementById("modal-cancel").onclick = closeModal;
+  document.getElementById("modal-submit").onclick = async () => {
+    const values = {};
+    modalState.fields.forEach((f) => {
+      values[f.name] = document.querySelector(`[data-field="${f.name}"]`).value;
+    });
+    try {
+      await modalState.onSubmit(values);
+      closeModal();
+    } catch (e) {
+      document.getElementById("modal-error").textContent = e.message;
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Views
+// ---------------------------------------------------------------------------
+
+function renderLogin() {
+  app.innerHTML = `
+    <div class="center-screen">
+      <div class="card">
+        <h1>Prexpa Staff</h1>
+        <p class="sub">Owner &amp; worker access only.</p>
+        <label>Email</label>
+        <input id="email" type="email" autocomplete="username" />
+        <label>Password</label>
+        <input id="password" type="password" autocomplete="current-password" />
+        <button class="primary full" id="login-btn" ${state.busy ? "disabled" : ""}>${state.busy ? "Signing in..." : "Sign in"}</button>
+        <div class="error">${escapeHtml(state.error || "")}</div>
+      </div>
+    </div>`;
+  document.getElementById("login-btn").onclick = () => {
+    doLogin(document.getElementById("email").value.trim(), document.getElementById("password").value);
+  };
+}
+
+function renderMfaEnroll() {
+  const e = state.enroll;
+  app.innerHTML = `
+    <div class="center-screen">
+      <div class="card">
+        <h1>Set up two-factor authentication</h1>
+        <p class="sub">Required before this account can be used. Scan with an authenticator app (Google Authenticator, Authy, 1Password, ...).</p>
+        ${e ? `
+          <div class="qr-box"><img src="${e.qrSvg}" alt="TOTP QR code" /></div>
+          <div class="mono">Can't scan? Enter manually: ${escapeHtml(e.secret)}</div>
+          <label>6-digit code</label>
+          <input id="mfa-code" type="text" inputmode="numeric" maxlength="6" placeholder="123456" />
+          <button class="primary full" id="verify-btn" ${state.busy ? "disabled" : ""}>${state.busy ? "Verifying..." : "Verify & activate"}</button>
+        ` : `
+          <button class="primary full" id="start-enroll-btn" ${state.busy ? "disabled" : ""}>${state.busy ? "Starting..." : "Start setup"}</button>
+        `}
+        <div class="error">${escapeHtml(state.error || "")}</div>
+        <div class="hint"><a href="#" id="signout-link" style="color:var(--muted)">Sign out</a></div>
+      </div>
+    </div>`;
+  const startBtn = document.getElementById("start-enroll-btn");
+  if (startBtn) startBtn.onclick = startEnroll;
+  const verifyBtn = document.getElementById("verify-btn");
+  if (verifyBtn) verifyBtn.onclick = () => verifyEnroll(document.getElementById("mfa-code").value.trim());
+  document.getElementById("signout-link").onclick = (ev) => { ev.preventDefault(); signOut(); };
+}
+
+function renderMfaChallenge() {
+  app.innerHTML = `
+    <div class="center-screen">
+      <div class="card">
+        <h1>Two-factor verification</h1>
+        <p class="sub">Enter the 6-digit code from your authenticator app.</p>
+        <label>Code</label>
+        <input id="mfa-code" type="text" inputmode="numeric" maxlength="6" placeholder="123456" />
+        <button class="primary full" id="verify-btn" ${state.busy ? "disabled" : ""}>${state.busy ? "Verifying..." : "Verify"}</button>
+        <div class="error">${escapeHtml(state.error || "")}</div>
+        <div class="hint"><a href="#" id="signout-link" style="color:var(--muted)">Sign out</a></div>
+      </div>
+    </div>`;
+  document.getElementById("verify-btn").onclick = () => verifyChallenge(document.getElementById("mfa-code").value.trim());
+  document.getElementById("signout-link").onclick = (ev) => { ev.preventDefault(); signOut(); };
+}
+
+function statusBadge(status) {
+  return `<span class="badge ${escapeHtml(status)}">${escapeHtml(status)}</span>`;
+}
+
+function renderWithdrawalRow(w) {
+  const approvals = state.approvalsByRequest[w.id];
+  let approvalsLine = "";
+  if (w.status === "pending" || w.status === "approved") {
+    approvalsLine = approvals
+      ? `<div class="approvals-line">Approvals: ${approvals.map((a) => a.approverRole).join(", ") || "none yet"} <a href="#" data-refresh-approvals="${w.id}">refresh</a></div>`
+      : `<div class="approvals-line"><a href="#" data-load-approvals="${w.id}">show approvals</a></div>`;
+  }
+
+  let actions = "";
+  if (w.status === "pending") {
+    actions = `
+      <button class="ok" data-approve="${w.id}">Approve</button>
+      <button class="danger" data-reject="${w.id}">Reject</button>`;
+  } else if (w.status === "approved") {
+    actions = `
+      <button class="ok" data-exec-manual="${w.id}">Execute (manual)</button>
+      <button data-exec-auto="${w.id}">Execute (automatic)</button>
+      <button class="danger" data-reject="${w.id}">Reject</button>`;
+  } else if (w.status === "processing") {
+    actions = `<span class="muted">Awaiting Paystack confirmation...</span>`;
+  }
+
+  return `
+    <tr>
+      <td>
+        <div>${toNaira(w.amountKobo)}</div>
+        <div class="muted">${escapeHtml(w.accountName)} · ${escapeHtml(w.bankName)}</div>
+        <div class="muted">${escapeHtml(w.accountNumber)}</div>
+      </td>
+      <td>${statusBadge(w.status)}${w.rejectionReason ? `<div class="muted" style="margin-top:4px">${escapeHtml(w.rejectionReason)}</div>` : ""}</td>
+      <td class="muted">${new Date(w.createdAt).toLocaleString()}</td>
+      <td>
+        <div class="row-actions">${actions}</div>
+        ${approvalsLine}
+      </td>
+    </tr>`;
+}
+
+function renderWithdrawals() {
+  const rows = state.withdrawals.map(renderWithdrawalRow).join("");
+  return `
+    <div class="panel">
+      <h2>Withdrawal requests</h2>
+      <table>
+        <thead><tr><th>Amount / bank</th><th>Status</th><th>Requested</th><th>Actions</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="4" class="muted">No withdrawal requests.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderStaff() {
+  const rows = state.staff.map((s) => `
+    <div class="staff-list-item">
+      <div>
+        <div>${escapeHtml(s.name || s.email)}</div>
+        <div class="muted">${escapeHtml(s.email)} · ${escapeHtml(s.staffRole)}</div>
+      </div>
+      <button class="danger" data-revoke-staff="${s.uid}">Revoke</button>
+    </div>`).join("");
+  return `
+    <div class="panel">
+      <h2>Staff</h2>
+      ${rows || `<div class="muted">No staff on record.</div>`}
+      <button class="full" id="grant-staff-btn" style="margin-top:16px">Grant staff access</button>
+    </div>`;
+}
+
+function renderSettings() {
+  const thresholdNaira = state.settings ? (state.settings.payoutHighTierThresholdKobo / 100).toFixed(2) : "...";
+  return `
+    <div class="panel">
+      <h2>Payout approval tier threshold</h2>
+      <p class="muted">Requests at or below this amount need any one admin's approval. Above it, the owner alone or two distinct workers.</p>
+      <label>Threshold (₦)</label>
+      <input id="threshold-input" type="number" step="0.01" value="${escapeHtml(thresholdNaira)}" />
+      <button class="primary full" id="save-threshold-btn">Save</button>
+    </div>`;
+}
+
+function renderDashboard() {
+  const tabs = ["withdrawals"].concat(state.isOwner ? ["staff", "settings"] : []);
+  const tabLabel = { withdrawals: "Withdrawals", staff: "Staff", settings: "Settings" };
+  let content = "";
+  if (state.tab === "withdrawals") content = renderWithdrawals();
+  else if (state.tab === "staff" && state.isOwner) content = renderStaff();
+  else if (state.tab === "settings" && state.isOwner) content = renderSettings();
+
+  app.innerHTML = `
+    <header class="top">
+      <div>
+        <strong>Prexpa Staff</strong>
+        <div class="who">${escapeHtml(state.session.user.email)} · ${state.isOwner ? "owner" : "worker"}</div>
+      </div>
+      <button id="signout-btn">Sign out</button>
+    </header>
+    <nav class="tabs">
+      ${tabs.map((t) => `<button data-tab="${t}" class="${state.tab === t ? "active" : ""}">${tabLabel[t]}</button>`).join("")}
+    </nav>
+    <div id="tab-content">${content}</div>
+    ${renderModal()}
+  `;
+
+  document.getElementById("signout-btn").onclick = signOut;
+  document.querySelectorAll("[data-tab]").forEach((btn) => {
+    btn.onclick = async () => {
+      state.tab = btn.dataset.tab;
+      if (state.tab === "settings" && !state.settings) await loadSettings();
+      render();
+    };
+  });
+
+  wireWithdrawalActions();
+  wireStaffActions();
+  wireSettingsActions();
+  wireModal();
+}
+
+function wireWithdrawalActions() {
+  document.querySelectorAll("[data-approve]").forEach((btn) => {
+    btn.onclick = () => approveWithdrawal(btn.dataset.approve);
+  });
+  document.querySelectorAll("[data-reject]").forEach((btn) => {
+    btn.onclick = () => openModal({
+      title: "Reject withdrawal",
+      fields: [{ name: "reason", label: "Reason", placeholder: "Why is this being rejected?" }],
+      submitLabel: "Reject",
+      onSubmit: (v) => rejectWithdrawal(btn.dataset.reject, v.reason),
+    });
+  });
+  document.querySelectorAll("[data-exec-manual]").forEach((btn) => {
+    btn.onclick = () => openModal({
+      title: "Execute manually",
+      fields: [{ name: "reference", label: "Reference / note", placeholder: "e.g. bank transfer ref" }],
+      submitLabel: "Mark paid",
+      onSubmit: (v) => executeManual(btn.dataset.execManual, v.reference),
+    });
+  });
+  document.querySelectorAll("[data-exec-auto]").forEach((btn) => {
+    btn.onclick = async () => {
+      let banks = [];
+      try { banks = await apiFetch("/wallet/admin/banks"); } catch (e) { toast(e.message, "error"); return; }
+      openModal({
+        title: "Execute automatically via Paystack",
+        fields: [{
+          name: "bankCode", label: "Confirm the real bank (never auto-matched)", type: "select",
+          options: banks.map((b) => ({ value: b.code, label: b.name })),
+        }],
+        submitLabel: "Start transfer",
+        onSubmit: (v) => executeAutomatic(btn.dataset.execAuto, v.bankCode),
+      });
+    };
+  });
+  document.querySelectorAll("[data-load-approvals]").forEach((btn) => {
+    btn.onclick = (ev) => { ev.preventDefault(); loadApprovals(btn.dataset.loadApprovals); };
+  });
+  document.querySelectorAll("[data-refresh-approvals]").forEach((btn) => {
+    btn.onclick = (ev) => { ev.preventDefault(); loadApprovals(btn.dataset.refreshApprovals); };
+  });
+}
+
+function wireStaffActions() {
+  document.querySelectorAll("[data-revoke-staff]").forEach((btn) => {
+    btn.onclick = () => { if (confirm("Revoke staff access for this account?")) revokeStaff(btn.dataset.revokeStaff); };
+  });
+  const grantBtn = document.getElementById("grant-staff-btn");
+  if (grantBtn) grantBtn.onclick = () => openModal({
+    title: "Grant staff access",
+    fields: [
+      { name: "uid", label: "User UID", placeholder: "existing account's uuid" },
+      { name: "role", label: "Role", type: "select", options: [{ value: "worker", label: "Worker" }, { value: "admin", label: "Owner" }] },
+    ],
+    submitLabel: "Grant",
+    onSubmit: (v) => grantStaff(v.uid, v.role),
+  });
+}
+
+function wireSettingsActions() {
+  const btn = document.getElementById("save-threshold-btn");
+  if (btn) btn.onclick = () => updateThreshold(document.getElementById("threshold-input").value);
+}
+
+function render() {
+  if (state.view === "login") return renderLogin();
+  if (state.view === "mfa-enroll") return renderMfaEnroll();
+  if (state.view === "mfa-challenge") return renderMfaChallenge();
+  if (state.view === "dashboard") return renderDashboard();
+  app.innerHTML = `<div class="center-screen"><div class="muted">Loading...</div></div>`;
+}
+
+sb.auth.onAuthStateChange((_event, _session) => {
+  // Re-derive from getSession() inside refreshAuthState rather than trusting
+  // this callback's own session payload, so AAL is always freshly checked.
+  if (state.view !== "loading") refreshAuthState();
+});
+
+render();
+refreshAuthState();
+</script>
+</body>
+</html>

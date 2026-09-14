@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "admin-dashboard",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["admin-dashboard/.devserver.js"],
+      "port": 5183
+    }
+  ]
+}
