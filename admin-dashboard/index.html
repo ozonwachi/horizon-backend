@@ -111,6 +111,20 @@
   .toast.error { border-color: var(--danger); color: var(--danger); }
   .toast.ok { border-color: var(--ok); color: var(--ok); }
   .qr-box { background: #fff; padding: 12px; border-radius: 8px; display: inline-block; margin: 12px 0; }
+  .chat-panel {
+    position: fixed; right: 20px; bottom: 20px; width: 360px; max-width: calc(100vw - 40px);
+    height: 480px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    display: flex; flex-direction: column; z-index: 60; box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  }
+  .chat-panel-header { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+  .chat-panel-messages { flex: 1; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .chat-bubble { max-width: 80%; padding: 6px 10px; border-radius: 8px; font-size: 13px; }
+  .chat-bubble .who { font-size: 10px; font-weight: 700; text-transform: uppercase; opacity: .7; margin-bottom: 2px; }
+  .chat-bubble.buyer { align-self: flex-start; background: var(--panel-2); }
+  .chat-bubble.seller { align-self: flex-start; background: #2a2418; }
+  .chat-bubble.admin { align-self: flex-end; background: var(--accent); color: #fff; }
+  .chat-panel-input { display: flex; gap: 6px; padding: 10px; border-top: 1px solid var(--border); }
+  .chat-panel-input input { flex: 1; margin: 0; }
   .qr-box img { display: block; width: 180px; height: 180px; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; color: var(--muted); }
   .staff-list-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); }
@@ -165,6 +179,16 @@ const state = {
   analytics: null,
   needsAttention: {},
   disputeCount: 0,
+  auditLog: [],
+  userSearchQuery: "",
+  userSearchResults: [],
+  listingsQuery: "",
+  listingsTypes: new Set(["listing", "job", "barter"]),
+  listingsResults: [],
+  flaggedConversation: null, // { conversationId, relatedItemTitle, messages }
+  postPreview: null, // { type, title, description, ownerName }
+  evidenceByAgreement: {}, // agreementId -> { auditLog: [], conversation: null }
+  chat: null, // { conversationId, agreementId, buyerId, sellerId, buyerName, sellerName, messages: [], channel }
   busy: false,
 };
 
@@ -389,6 +413,88 @@ async function loadOffPlatformDeals() {
 
 async function loadAnalytics() {
   state.analytics = await apiFetch("/admin/analytics");
+}
+
+async function loadAuditLog() {
+  state.auditLog = await apiFetch("/escrow/agreements/admin/audit-log");
+}
+
+// Profiles are publicly readable (same RLS the app's own admin user search
+// relies on) - goes straight through the Supabase client, no backend route
+// needed, exactly like AdminModerationService.searchUsers does in Flutter.
+async function searchUsers(query) {
+  const q = query.trim();
+  if (!q) { state.userSearchResults = []; render(); return; }
+  const { data, error } = await sb
+    .from("profiles")
+    .select("uid, name, username, email, account_status, trust_level")
+    .or(`username_lower.ilike.%${q.toLowerCase()}%,name.ilike.%${q}%,email.ilike.%${q}%`)
+    .limit(20);
+  if (error) { toast(error.message, "error"); return; }
+  state.userSearchResults = data || [];
+  render();
+}
+
+// Listings/jobs/barter_posts are publicly readable - same direct-Postgrest
+// pattern AdminListingsService.search uses in Flutter, not a backend route.
+async function searchListings() {
+  const q = state.listingsQuery.trim();
+  const results = [];
+  if (state.listingsTypes.has("listing")) {
+    let b = sb.from("listings").select("id, title, description, owner_id, owner_name, created_at");
+    if (q) b = b.or(`title.ilike.%${q}%,description.ilike.%${q}%`);
+    const { data } = await b.order("created_at", { ascending: false }).limit(40);
+    (data || []).forEach((r) => results.push({ id: r.id, type: "listing", title: r.title || "(untitled listing)", subtitle: "Listing · " + (r.owner_name || "Unknown"), createdAt: r.created_at }));
+  }
+  if (state.listingsTypes.has("job")) {
+    let b = sb.from("jobs").select("id, title, description, poster_id, poster_name, is_service_offer, created_at");
+    if (q) b = b.or(`title.ilike.%${q}%,description.ilike.%${q}%`);
+    const { data } = await b.order("created_at", { ascending: false }).limit(40);
+    (data || []).forEach((r) => results.push({ id: r.id, type: "job", title: r.title || "(untitled job)", subtitle: (r.is_service_offer ? "Service offer" : "Job") + " · " + (r.poster_name || "Unknown"), createdAt: r.created_at }));
+  }
+  if (state.listingsTypes.has("barter")) {
+    let b = sb.from("barter_posts").select("id, offering, seeking, description, poster_id, poster_name, created_at");
+    if (q) b = b.or(`offering.ilike.%${q}%,seeking.ilike.%${q}%,description.ilike.%${q}%`);
+    const { data } = await b.order("created_at", { ascending: false }).limit(40);
+    (data || []).forEach((r) => results.push({ id: r.id, type: "barter", title: (r.offering || "?") + " for " + (r.seeking || "?"), subtitle: "Barter · " + (r.poster_name || "Unknown"), createdAt: r.created_at }));
+  }
+  results.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  state.listingsResults = results;
+  render();
+}
+
+// Listings/jobs/barter_posts are publicly readable - direct Postgrest read
+// for a report's "jump to the post" link, same table access the app's own
+// listing/job/barter detail screens already use.
+async function loadPostPreview(type, id) {
+  const table = type === "listing" ? "listings" : type === "job" ? "jobs" : "barter_posts";
+  const { data, error } = await sb.from(table).select("*").eq("id", id).maybeSingle();
+  if (error) { toast(error.message, "error"); return; }
+  if (!data) { toast("Post not found - it may already be deleted.", "error"); return; }
+  state.postPreview = {
+    type,
+    title: data.title || (data.offering ? `${data.offering} for ${data.seeking}` : "(untitled)"),
+    description: data.description || "",
+    ownerName: data.owner_name || data.poster_name || "",
+  };
+  render();
+}
+
+async function loadFlaggedConversation(flagId) {
+  state.flaggedConversation = await apiFetch("/admin/contact-flags/" + flagId + "/conversation");
+  render();
+}
+
+// The dispute/deal "Evidence" - admin-action history scoped to this deal,
+// plus the read-only buyer/seller conversation. Mirrors EscrowDetailScreen's
+// Evidence panel in the app exactly.
+async function loadEvidence(agreementId) {
+  const [auditLog, conversation] = await Promise.all([
+    apiFetch("/escrow/agreements/admin/audit-log?agreementId=" + agreementId),
+    apiFetch("/escrow/agreements/" + agreementId + "/admin-conversation"),
+  ]);
+  state.evidenceByAgreement[agreementId] = { auditLog, conversation };
+  render();
 }
 
 // Powers the red count badges on tabs. Reuses get_platform_analytics()'s
@@ -764,6 +870,100 @@ async function payOffPlatformDealReward(id, nairaAmount) {
   } catch (e) { toast(e.message, "error"); }
 }
 
+async function deleteListingPost(type, id) {
+  try {
+    await apiFetch("/admin/listings/" + type + "/" + id, { method: "DELETE" });
+    toast("Post removed.", "ok");
+    await searchListings();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function adminEditTranche(agreementId, trancheId, changes, reason) {
+  try {
+    await apiFetch("/escrow/agreements/" + agreementId + "/tranches/" + trancheId + "/admin-edit", { method: "POST", body: { changes, reason } });
+    toast("Tranche updated.", "ok");
+    delete state.evidenceByAgreement[agreementId];
+    await loadDisputes();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+// ---------------------------------------------------------------------------
+// Deal Support Chat - the live three-way buyer/seller/admin thread. Unlike
+// everything else in this dashboard, this writes straight to Postgres via
+// the admin's own authenticated session (not through an edge function) -
+// that's exactly how the Flutter app does it too (see MessageService in
+// marketplace_app), relying on the same "is_support_conversation" RLS
+// carve-out that already lets any admin into a deal's support thread.
+// Conversation id formula MUST match escrowConversationId() on the backend
+// and MessageService._conversationId() in Flutter exactly, or this looks up
+// the wrong (or a duplicate) conversation.
+// ---------------------------------------------------------------------------
+
+function escrowConversationId(buyerId, sellerId, agreementId) {
+  const sorted = [buyerId, sellerId].sort();
+  return `${sorted[0]}_${sorted[1]}_escrow_${agreementId}`;
+}
+
+async function openChat(agreementId, buyerId, sellerId, buyerName, sellerName) {
+  const conversationId = escrowConversationId(buyerId, sellerId, agreementId);
+  const myUid = state.session.user.id;
+  const myName = state.session.user.email;
+
+  const { data: existing, error: existingErr } = await sb.from("conversations").select("id").eq("id", conversationId).maybeSingle();
+  if (existingErr) { toast(existingErr.message, "error"); return; }
+  if (!existing) {
+    const sortedIds = [buyerId, sellerId].sort();
+    const { error: insertErr } = await sb.from("conversations").insert({
+      id: conversationId,
+      participant_ids: sortedIds,
+      participant_names: { [buyerId]: buyerName, [sellerId]: sellerName },
+      last_message: "",
+      last_message_sender_id: null,
+      related_item_type: "escrow",
+      related_item_id: agreementId,
+      related_item_title: "Deal support",
+      is_support_conversation: true,
+    });
+    if (insertErr) { toast(insertErr.message, "error"); return; }
+  }
+
+  const { data: msgRows, error: msgErr } = await sb.from("messages").select("id, sender_id, text, sent_at, sender_role").eq("conversation_id", conversationId).order("sent_at", { ascending: true });
+  if (msgErr) { toast(msgErr.message, "error"); return; }
+
+  closeChat();
+  state.chat = { conversationId, agreementId, buyerId, sellerId, buyerName, sellerName, myUid, myName, messages: msgRows || [] };
+  render();
+
+  state.chat.channel = sb
+    .channel("chat-" + conversationId)
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter: "conversation_id=eq." + conversationId }, (payload) => {
+      if (!state.chat || state.chat.conversationId !== conversationId) return;
+      state.chat.messages.push(payload.new);
+      render();
+    })
+    .subscribe();
+}
+
+function closeChat() {
+  if (state.chat && state.chat.channel) sb.removeChannel(state.chat.channel);
+  state.chat = null;
+}
+
+async function sendChatMessage(text) {
+  const trimmed = (text || "").trim();
+  if (!trimmed || !state.chat) return;
+  const { conversationId, myUid } = state.chat;
+  const { error: insertErr } = await sb.from("messages").insert({
+    conversation_id: conversationId, sender_id: myUid, text: trimmed, sender_role: "admin",
+  });
+  if (insertErr) { toast(insertErr.message, "error"); return; }
+  await sb.from("conversations").update({ last_message: trimmed, last_message_sender_id: myUid, last_message_at: new Date().toISOString() }).eq("id", conversationId);
+  // Fire-and-forget notify, matching MessageService.notifyNewMessage - tells
+  // the buyer/seller a message arrived, and runs the contact-share heuristic.
+  apiFetch("/conversations/" + conversationId + "/notify", { method: "POST", body: { text: trimmed } }).catch(() => {});
+}
+
 // ---------------------------------------------------------------------------
 // Modal (used for reject-reason / manual-reference / bank-pick prompts)
 // ---------------------------------------------------------------------------
@@ -818,6 +1018,42 @@ function wireModal() {
       document.getElementById("modal-error").textContent = e.message;
     }
   };
+}
+
+function renderChatPanel() {
+  if (!state.chat) return "";
+  const c = state.chat;
+  const bubbles = c.messages.map((m) => {
+    const role = m.sender_role || (m.sender_id === c.buyerId ? "buyer" : m.sender_id === c.sellerId ? "seller" : "admin");
+    const who = role === "buyer" ? c.buyerName : role === "seller" ? c.sellerName : "Admin";
+    return `<div class="chat-bubble ${escapeHtml(role)}"><div class="who">${escapeHtml(who)}</div>${escapeHtml(m.text)}</div>`;
+  }).join("");
+  return `
+    <div class="chat-panel">
+      <div class="chat-panel-header">
+        <strong>Deal Support Chat</strong>
+        <button id="chat-close-btn">✕</button>
+      </div>
+      <div class="chat-panel-messages" id="chat-messages">${bubbles || `<div class="muted">No messages yet.</div>`}</div>
+      <div class="chat-panel-input">
+        <input id="chat-input" type="text" placeholder="Message buyer and seller..." />
+        <button class="primary" id="chat-send-btn">Send</button>
+      </div>
+    </div>`;
+}
+
+function wireChatPanel() {
+  const closeBtn = document.getElementById("chat-close-btn");
+  if (closeBtn) closeBtn.onclick = () => { closeChat(); render(); };
+  const sendBtn = document.getElementById("chat-send-btn");
+  const input = document.getElementById("chat-input");
+  if (sendBtn && input) {
+    const send = async () => { const v = input.value; input.value = ""; await sendChatMessage(v); };
+    sendBtn.onclick = send;
+    input.onkeydown = (ev) => { if (ev.key === "Enter") send(); };
+  }
+  const messagesEl = document.getElementById("chat-messages");
+  if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,6 +1271,24 @@ function renderSettings() {
   `;
 }
 
+function renderEvidence(agreementId) {
+  const ev = state.evidenceByAgreement[agreementId];
+  if (!ev) return `<a href="#" data-load-evidence="${agreementId}">Load evidence (admin history + buyer/seller conversation)</a>`;
+  const logRows = (ev.auditLog || []).map((e) => `
+    <div class="approvals-line">${new Date(e.createdAt).toLocaleString()} · ${escapeHtml(e.action)}${e.reason ? " - " + escapeHtml(e.reason) : ""}</div>`).join("") || `<div class="muted">No admin actions on this deal yet.</div>`;
+  const convo = ev.conversation;
+  const msgRows = convo && convo.exists
+    ? (convo.messages || []).map((m) => `<div class="approvals-line"><strong>${escapeHtml(convo.participantNames?.[m.senderId] || m.senderId)}:</strong> ${escapeHtml(m.text)}</div>`).join("")
+    : `<div class="muted">No buyer/seller conversation on this deal.</div>`;
+  return `
+    <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+      <div class="muted" style="font-weight:600;margin-bottom:4px">Admin actions</div>
+      ${logRows}
+      <div class="muted" style="font-weight:600;margin:8px 0 4px">Buyer/seller conversation</div>
+      ${msgRows}
+    </div>`;
+}
+
 function renderDisputes() {
   const rows = state.disputes.map((a) => (a.tranches || []).filter((t) => t.status === "disputed").map((t) => `
     <tr>
@@ -1047,16 +1301,30 @@ function renderDisputes() {
       <td class="row-actions">
         <button class="ok" data-resolve-release="${a.id}|${t.id}">Release to seller</button>
         <button class="danger" data-resolve-refund="${a.id}|${t.id}">Refund buyer</button>
+        <button data-open-chat="${a.id}|${escapeHtml(a.buyerId)}|${escapeHtml(a.sellerId)}">Open Support Chat</button>
+        ${renderEvidence(a.id)}
       </td>
     </tr>`).join("")).join("");
   return `
     <div class="panel">
       <h2>Disputed deals</h2>
-      <p class="muted">Workers must escalate disputes above the payout threshold (Settings tab) to the owner.</p>
+      <p class="muted">Workers must escalate disputes above the payout threshold (Settings tab) to the owner. Load the evidence (admin history + buyer/seller conversation) before deciding.</p>
       <table>
         <thead><tr><th>Deal</th><th>Amount</th><th>Reason</th><th>Resolve</th></tr></thead>
         <tbody>${rows || `<tr><td colspan="4" class="muted">No disputed tranches.</td></tr>`}</tbody>
       </table>
+    </div>`;
+}
+
+function renderPostPreview() {
+  const p = state.postPreview;
+  if (!p) return "";
+  return `
+    <div class="panel">
+      <h2>${escapeHtml(p.title)}</h2>
+      <p class="muted">${escapeHtml(p.type)} · ${escapeHtml(p.ownerName)}</p>
+      <p>${escapeHtml(p.description)}</p>
+      <button id="close-post-preview">Close</button>
     </div>`;
 }
 
@@ -1068,12 +1336,14 @@ function renderReports() {
       <td><span class="badge ${escapeHtml(r.status)}">${escapeHtml(r.status)}</span></td>
       <td class="muted">by ${escapeHtml(r.reporterName || r.reporterUid)}</td>
       <td class="row-actions">
+        <a href="#" data-view-post="${r.targetType}|${r.targetId}">View post</a>
         <button data-report-status="${r.id}" data-status="reviewed">Mark reviewed</button>
         <button data-report-status="${r.id}" data-status="dismissed">Dismiss</button>
         <button class="danger" data-delete-listing="${r.id}">Remove post</button>
       </td>
     </tr>`).join("");
   return `
+    ${renderPostPreview()}
     <div class="panel">
       <h2>Reports</h2>
       <table>
@@ -1084,10 +1354,24 @@ function renderReports() {
 }
 
 function renderModeration() {
+  const searchRows = state.userSearchResults.map((u) => `
+    <div class="staff-list-item">
+      <div>
+        <div>${escapeHtml(u.name || u.username)} <span class="muted">${escapeHtml(u.email)}</span></div>
+        <div class="muted">${escapeHtml(u.account_status)} · ${escapeHtml(u.trust_level)}</div>
+      </div>
+      <button data-use-email="${escapeHtml(u.email)}">Use</button>
+    </div>`).join("");
   return `
     <div class="panel">
+      <h2>Find a user</h2>
+      <p class="muted">Search by name, username, or email - same as the app's user search.</p>
+      <input id="user-search-input" type="text" placeholder="Search..." value="${escapeHtml(state.userSearchQuery)}" />
+      ${searchRows || (state.userSearchQuery ? `<div class="muted" style="margin-top:10px">No matches.</div>` : "")}
+    </div>
+    <div class="panel">
       <h2>Account status</h2>
-      <p class="muted">Set a user's account status by their UID. active / investigating / frozen / banned / deactivated.</p>
+      <p class="muted">Set a user's account status by their email. active / investigating / frozen / banned / deactivated.</p>
       <label>User email</label>
       <input id="mod-email" type="email" placeholder="user@example.com" />
       <label>Status</label>
@@ -1157,6 +1441,18 @@ function renderVerification() {
     </div>`;
 }
 
+function renderFlaggedConversation() {
+  const fc = state.flaggedConversation;
+  if (!fc) return "";
+  const msgs = (fc.messages || []).map((m) => `<div class="approvals-line"><strong>${escapeHtml(m.senderName)}:</strong> ${escapeHtml(m.text)}</div>`).join("") || `<div class="muted">No messages.</div>`;
+  return `
+    <div class="panel">
+      <h2>Flagged conversation ${fc.relatedItemTitle ? "- " + escapeHtml(fc.relatedItemTitle) : ""}</h2>
+      ${msgs}
+      <button id="close-flagged-conversation" style="margin-top:12px">Close</button>
+    </div>`;
+}
+
 function renderContactFlags() {
   const rows = state.contactFlags.map((f) => `
     <tr>
@@ -1164,6 +1460,7 @@ function renderContactFlags() {
       <td class="mono">${escapeHtml(f.matchedSnippet)}</td>
       <td><span class="badge ${escapeHtml(f.status)}">${escapeHtml(f.status)}</span></td>
       <td class="row-actions">
+        <a href="#" data-view-flag-conversation="${f.id}">View Conversation</a>
         <button data-flag-status="${f.id}" data-status="reviewed">Reviewed</button>
         <button data-flag-status="${f.id}" data-status="dismissed">Dismiss</button>
       </td>
@@ -1175,7 +1472,8 @@ function renderContactFlags() {
         <thead><tr><th>Sender</th><th>Matched text</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>${rows || `<tr><td colspan="4" class="muted">No flags.</td></tr>`}</tbody>
       </table>
-    </div>`;
+    </div>
+    ${renderFlaggedConversation()}`;
 }
 
 function renderBanEvasion() {
@@ -1202,13 +1500,19 @@ function renderBanEvasion() {
 
 function renderBannedPhones() {
   const rows = state.bannedPhones.map((p) => `
-    <tr><td>${escapeHtml(p.phone)}</td><td>${escapeHtml(p.name || p.bannedUid || "")}</td><td class="muted">${p.bannedAt ? new Date(p.bannedAt).toLocaleDateString() : ""}</td></tr>`).join("");
+    <tr>
+      <td>${escapeHtml(p.phone)}</td>
+      <td>${escapeHtml(p.name || p.username || p.bannedUid || "")}</td>
+      <td>${p.hasIdOnFile && p.idPhotoUrl ? `<img src="${p.idPhotoUrl}" style="max-width:80px;border-radius:4px" />` : `<span class="muted">no ID on file</span>`}</td>
+      <td class="muted">${p.bannedAt ? new Date(p.bannedAt).toLocaleDateString() : ""}</td>
+    </tr>`).join("");
   return `
     <div class="panel">
       <h2>Banned phone numbers</h2>
+      <p class="muted">Compare a new signup's identity photo against these to spot a repeat attempt.</p>
       <table>
-        <thead><tr><th>Phone</th><th>Account</th><th>Banned</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="3" class="muted">None.</td></tr>`}</tbody>
+        <thead><tr><th>Phone</th><th>Account</th><th>ID photo</th><th>Banned</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="4" class="muted">None.</td></tr>`}</tbody>
       </table>
     </div>`;
 }
@@ -1341,6 +1645,21 @@ function renderTools() {
       <h2>Push notification diagnostics</h2>
       <p class="muted">Tests your own account's push delivery.</p>
       <button class="full" id="push-test-btn">Run test</button>
+    </div>
+    <div class="panel">
+      <h2>Edit a tranche</h2>
+      <p class="muted">Adjust a tranche's amount or label - only while it's still pending (not yet funded/released/disputed).</p>
+      <label>Agreement ID</label>
+      <input id="edit-tranche-agreement" type="text" />
+      <label>Tranche ID</label>
+      <input id="edit-tranche-tranche" type="text" />
+      <label>New amount (₦, optional)</label>
+      <input id="edit-tranche-amount" type="number" step="0.01" />
+      <label>New label (optional)</label>
+      <input id="edit-tranche-label" type="text" />
+      <label>Reason (required)</label>
+      <input id="edit-tranche-reason" type="text" />
+      <button class="primary full" id="edit-tranche-btn">Save</button>
     </div>`;
 }
 
@@ -1351,6 +1670,48 @@ function renderAnalytics() {
     <div class="panel">
       <h2>Analytics</h2>
       <table>${rows || `<tr><td class="muted">No data.</td></tr>`}</table>
+    </div>`;
+}
+
+function renderAuditLog() {
+  const rows = state.auditLog.map((e) => `
+    <tr>
+      <td class="muted">${new Date(e.createdAt).toLocaleString()}</td>
+      <td>${escapeHtml(e.action)}</td>
+      <td>${escapeHtml(e.targetType)}<div class="muted">${escapeHtml(e.targetId)}</div></td>
+      <td class="muted">${escapeHtml(e.reason || "")}</td>
+    </tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>Audit log</h2>
+      <p class="muted">Every admin action across every deal, most recent first.</p>
+      <table>
+        <thead><tr><th>When</th><th>Action</th><th>Target</th><th>Reason</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="4" class="muted">No entries.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderListings() {
+  const typeChip = (t, label) => `<button data-listing-type-toggle="${t}" class="${state.listingsTypes.has(t) ? "active" : ""}">${label}</button>`;
+  const rows = state.listingsResults.map((r) => `
+    <tr>
+      <td>${escapeHtml(r.title)}<div class="muted">${escapeHtml(r.subtitle)}</div></td>
+      <td class="muted">${r.createdAt ? new Date(r.createdAt).toLocaleDateString() : ""}</td>
+      <td><button class="danger" data-delete-post="${r.type}|${r.id}">Remove</button></td>
+    </tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>Listing management</h2>
+      <p class="muted">Browse and remove any listing, job, or barter post directly - no report needed first.</p>
+      <input id="listings-search-input" type="text" placeholder="Search..." value="${escapeHtml(state.listingsQuery)}" />
+      <div class="row-actions" style="margin:10px 0">
+        ${typeChip("listing", "Listings")}${typeChip("job", "Jobs")}${typeChip("barter", "Barter")}
+      </div>
+      <table>
+        <thead><tr><th>Post</th><th>Posted</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="3" class="muted">No results.</td></tr>`}</tbody>
+      </table>
     </div>`;
 }
 
@@ -1368,8 +1729,10 @@ const TAB_CONFIG = [
   { key: "faqs", label: "FAQs", ownerOnly: false, render: renderFaqs, load: loadFaqs },
   { key: "contactMessages", label: "Contact Messages", ownerOnly: false, render: renderContactMessages, load: loadContactMessages },
   { key: "offPlatformDeals", label: "Off-Platform Deals", ownerOnly: false, render: renderOffPlatformDeals, load: loadOffPlatformDeals },
+  { key: "listings", label: "Listings", ownerOnly: false, render: renderListings, load: searchListings },
   { key: "tools", label: "Tools", ownerOnly: false, render: renderTools },
   { key: "analytics", label: "Analytics", ownerOnly: false, render: renderAnalytics, load: loadAnalytics },
+  { key: "auditLog", label: "Audit Log", ownerOnly: false, render: renderAuditLog, load: loadAuditLog },
   { key: "staff", label: "Staff", ownerOnly: true, render: renderStaff },
   { key: "settings", label: "Settings", ownerOnly: false, render: renderSettings, load: loadSettings },
 ];
@@ -1395,6 +1758,7 @@ function renderDashboard() {
     </nav>
     <div id="tab-content">${content}</div>
     ${renderModal()}
+    ${renderChatPanel()}
   `;
 
   document.getElementById("signout-btn").onclick = signOut;
@@ -1424,7 +1788,9 @@ function renderDashboard() {
   wireContactMessageActions();
   wireOffPlatformDealActions();
   wireToolsActions();
+  wireListingsActions();
   wireModal();
+  wireChatPanel();
 }
 
 function wireWithdrawalActions() {
@@ -1584,6 +1950,17 @@ function wireDisputeActions() {
       });
     };
   });
+  document.querySelectorAll("[data-load-evidence]").forEach((a) => {
+    a.onclick = (ev) => { ev.preventDefault(); loadEvidence(a.dataset.loadEvidence); };
+  });
+  document.querySelectorAll("[data-open-chat]").forEach((b) => {
+    b.onclick = async () => {
+      const [agreementId, buyerId, sellerId] = b.dataset.openChat.split("|");
+      const { data: profiles } = await sb.from("profiles").select("uid, name").in("uid", [buyerId, sellerId]);
+      const nameOf = (uid) => (profiles || []).find((p) => p.uid === uid)?.name || uid;
+      await openChat(agreementId, buyerId, sellerId, nameOf(buyerId), nameOf(sellerId));
+    };
+  });
 }
 
 function wireReportActions() {
@@ -1593,9 +1970,31 @@ function wireReportActions() {
   document.querySelectorAll("[data-delete-listing]").forEach((b) => {
     b.onclick = () => { if (confirm("Remove the reported post?")) deleteReportedPost(b.dataset.deleteListing); };
   });
+  document.querySelectorAll("[data-view-post]").forEach((a) => {
+    a.onclick = (ev) => { ev.preventDefault(); const [type, id] = a.dataset.viewPost.split("|"); loadPostPreview(type, id); };
+  });
+  const closeBtn = document.getElementById("close-post-preview");
+  if (closeBtn) closeBtn.onclick = () => { state.postPreview = null; render(); };
 }
 
+let userSearchDebounce = null;
 function wireModerationActions() {
+  const searchInput = document.getElementById("user-search-input");
+  if (searchInput) {
+    searchInput.oninput = () => {
+      state.userSearchQuery = searchInput.value;
+      clearTimeout(userSearchDebounce);
+      userSearchDebounce = setTimeout(() => searchUsers(state.userSearchQuery), 300);
+    };
+  }
+  document.querySelectorAll("[data-use-email]").forEach((b) => {
+    b.onclick = () => {
+      const emailInput = document.getElementById("mod-email");
+      if (emailInput) emailInput.value = b.dataset.useEmail;
+      const trustInput = document.getElementById("trust-email");
+      if (trustInput) trustInput.value = b.dataset.useEmail;
+    };
+  });
   const statusBtn = document.getElementById("mod-status-btn");
   if (statusBtn) statusBtn.onclick = () => setUserAccountStatus(
     document.getElementById("mod-email").value.trim(),
@@ -1628,6 +2027,11 @@ function wireContactFlagActions() {
   document.querySelectorAll("[data-flag-status]").forEach((b) => {
     b.onclick = () => updateContactFlagStatus(b.dataset.flagStatus, b.dataset.status);
   });
+  document.querySelectorAll("[data-view-flag-conversation]").forEach((a) => {
+    a.onclick = (ev) => { ev.preventDefault(); loadFlaggedConversation(a.dataset.viewFlagConversation); };
+  });
+  const closeBtn = document.getElementById("close-flagged-conversation");
+  if (closeBtn) closeBtn.onclick = () => { state.flaggedConversation = null; render(); };
 }
 
 function wireBanEvasionActions() {
@@ -1730,6 +2134,45 @@ function wireToolsActions() {
   );
   const pushBtn = document.getElementById("push-test-btn");
   if (pushBtn) pushBtn.onclick = runPushDiagnosticsTest;
+  const editTrancheBtn = document.getElementById("edit-tranche-btn");
+  if (editTrancheBtn) editTrancheBtn.onclick = () => {
+    const amount = document.getElementById("edit-tranche-amount").value;
+    const label = document.getElementById("edit-tranche-label").value;
+    const changes = {};
+    if (amount) changes.amountKobo = Math.round(Number(amount) * 100);
+    if (label) changes.label = label;
+    adminEditTranche(
+      document.getElementById("edit-tranche-agreement").value.trim(),
+      document.getElementById("edit-tranche-tranche").value.trim(),
+      changes,
+      document.getElementById("edit-tranche-reason").value
+    );
+  };
+}
+
+let listingsSearchDebounce = null;
+function wireListingsActions() {
+  const searchInput = document.getElementById("listings-search-input");
+  if (searchInput) {
+    searchInput.oninput = () => {
+      state.listingsQuery = searchInput.value;
+      clearTimeout(listingsSearchDebounce);
+      listingsSearchDebounce = setTimeout(searchListings, 300);
+    };
+  }
+  document.querySelectorAll("[data-listing-type-toggle]").forEach((b) => {
+    b.onclick = () => {
+      const t = b.dataset.listingTypeToggle;
+      if (state.listingsTypes.has(t)) state.listingsTypes.delete(t); else state.listingsTypes.add(t);
+      searchListings();
+    };
+  });
+  document.querySelectorAll("[data-delete-post]").forEach((b) => {
+    b.onclick = () => {
+      const [type, id] = b.dataset.deletePost.split("|");
+      if (confirm("Remove this post permanently?")) deleteListingPost(type, id);
+    };
+  });
 }
 
 function render() {
