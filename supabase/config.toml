@@ -30,6 +30,12 @@ verify_jwt = false
 [functions.account]
 verify_jwt = false
 
+[functions.ai]
+verify_jwt = false
+
+[functions.logistics]
+verify_jwt = false
+
 # share needs this for a different reason than the rest: its pages are
 # meant to be open to literally anyone who taps a shared link, logged in or
 # not - there's no auth to enforce at all here, application-level or

@@ -39,6 +39,7 @@ import {
 } from "../_shared/offPlatformDealReportService.ts";
 import { listAllFaqs, createFaq, updateFaq, deleteFaq } from "../_shared/faqService.ts";
 import { listContactMessages, replyToContactMessage } from "../_shared/contactAdminService.ts";
+import { listApplications as listLogisticsApplications, decideApplication as decideLogisticsApplication } from "../_shared/logisticsService.ts";
 import { runPushDiagnostics } from "../_shared/pushService.ts";
 import { rateLimitOrRespond } from "../_shared/rateLimitService.ts";
 
@@ -288,6 +289,34 @@ app.patch("/verifications/:id", async (c) => {
     return c.json(request);
   } catch (err) {
     console.error("Decide verification request failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.get("/logistics/applications", async (c) => {
+  const supabase = getAdminClient();
+  const status = c.req.query("status");
+  try {
+    const applications = await listLogisticsApplications(supabase, status || undefined);
+    return c.json({ applications });
+  } catch (err) {
+    console.error("List logistics partner applications failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.post("/logistics/applications/:id/decide", async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id");
+  const body = await c.req.json().catch(() => ({}));
+  if (body?.decision !== "approved" && body?.decision !== "rejected") {
+    return c.json({ error: 'decision must be "approved" or "rejected"' }, 400);
+  }
+  try {
+    const application = await decideLogisticsApplication(getAdminClient(), id, user.uid, body.decision, body?.notes);
+    return c.json(application);
+  } catch (err) {
+    console.error("Decide logistics partner application failed:", err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
   }
 });

@@ -92,6 +92,9 @@
   .badge.paid { background: #163a29; color: var(--ok); }
   .badge.rejected { background: #3a1f22; color: var(--danger); }
   .badge.failed { background: #3a1f22; color: var(--danger); }
+  .badge.low { background: #1f2f45; color: var(--accent); }
+  .badge.medium { background: #3a3320; color: var(--warn); }
+  .badge.high { background: #3a1f22; color: var(--danger); }
   .row-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
   .muted { color: var(--muted); }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 20px; }
@@ -189,6 +192,12 @@ const state = {
   postPreview: null, // { type, title, description, ownerName }
   evidenceByAgreement: {}, // agreementId -> { auditLog: [], conversation: null }
   chat: null, // { conversationId, agreementId, buyerId, sellerId, buyerName, sellerName, messages: [], channel }
+  aiEnabled: false, // whether ANTHROPIC_API_KEY is set on the backend - see /ai/status
+  aiSuggestionsByAgreement: {}, // agreementId -> [{ id, suggestion, model, createdAt }]
+  aiSuggestBusy: {}, // agreementId -> true while a suggestion request is in flight
+  aiFraudFlags: [],
+  aiFraudScanBusy: false,
+  logisticsApplications: [],
   busy: false,
 };
 
@@ -376,6 +385,22 @@ async function loadContactFlags() {
   state.contactFlags = r.flags;
 }
 
+async function loadLogisticsApplications() {
+  const r = await apiFetch("/admin/logistics/applications?status=pending");
+  state.logisticsApplications = r.applications;
+}
+
+async function decideLogisticsApplication(id, decision, notes) {
+  try {
+    await apiFetch(`/admin/logistics/applications/${id}/decide`, { method: "POST", body: { decision, notes } });
+    toast(decision === "approved" ? "Partner approved." : "Application rejected.", "ok");
+    await loadLogisticsApplications();
+    render();
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
 async function loadBanEvasionFlags() {
   const r = await apiFetch("/admin/ban-evasion-flags");
   state.banEvasionFlags = r.flags;
@@ -502,7 +527,15 @@ async function loadEvidence(agreementId) {
 // admin analytics screen) rather than inventing new counting endpoints -
 // only the dispute count has to be derived separately since disputes
 // aren't in that object.
+async function loadAiStatus() {
+  try {
+    const s = await apiFetch("/ai/status");
+    state.aiEnabled = Boolean(s && s.enabled);
+  } catch (_) { /* non-fatal - AI features just stay hidden/disabled */ }
+}
+
 async function refreshBadges() {
+  await loadAiStatus();
   try {
     const a = await apiFetch("/admin/analytics");
     state.needsAttention = a.needsAttention || {};
@@ -1308,7 +1341,50 @@ function renderEvidence(agreementId) {
       ${logRows}
       <div class="muted" style="font-weight:600;margin:8px 0 4px">Buyer/seller conversation</div>
       ${msgRows}
+      ${renderAiSuggestions(agreementId)}
     </div>`;
+}
+
+// AI dispute triage - purely advisory (see _shared/aiService.ts's doc
+// comment): a suggestion the admin can read before deciding, never a
+// decision made for them. Hidden entirely when AI isn't turned on
+// (ANTHROPIC_API_KEY not set) rather than showing a button that would just
+// error.
+function renderAiSuggestions(agreementId) {
+  if (!state.aiEnabled) return "";
+  const suggestions = state.aiSuggestionsByAgreement[agreementId] || [];
+  const busy = state.aiSuggestBusy[agreementId];
+  const rows = suggestions.map((s) => `
+    <div class="approvals-line" style="white-space:pre-wrap">
+      <span class="muted">${new Date(s.createdAt).toLocaleString()} · ${escapeHtml(s.model)}</span><br/>
+      ${escapeHtml(s.suggestion)}
+    </div>`).join("");
+  return `
+    <div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border)">
+      <div class="muted" style="font-weight:600;margin-bottom:4px">AI suggestion (advisory only - verify before acting)</div>
+      ${rows}
+      <button data-ai-suggest="${agreementId}" ${busy ? "disabled" : ""}>${busy ? "Thinking..." : (suggestions.length ? "Ask again" : "Ask AI for a suggestion")}</button>
+    </div>`;
+}
+
+async function askAiForDisputeSuggestion(agreementId) {
+  state.aiSuggestBusy[agreementId] = true;
+  render();
+  try {
+    const result = await apiFetch("/ai/dispute-triage", { method: "POST", body: { agreementId } });
+    if (result.enabled === false) {
+      toast("AI assistance isn't turned on yet.", "error");
+    } else {
+      const list = state.aiSuggestionsByAgreement[agreementId] || [];
+      list.unshift({ id: result.id, suggestion: result.suggestion, model: result.model, createdAt: result.createdAt });
+      state.aiSuggestionsByAgreement[agreementId] = list;
+    }
+  } catch (e) {
+    toast(e.message, "error");
+  } finally {
+    state.aiSuggestBusy[agreementId] = false;
+    render();
+  }
 }
 
 function renderDisputes() {
@@ -1373,6 +1449,100 @@ function renderReports() {
         <tbody>${rows || `<tr><td colspan="5" class="muted">No reports.</td></tr>`}</tbody>
       </table>
     </div>`;
+}
+
+// AI fraud flagging - see _shared/aiService.ts's doc comment. Purely
+// report-only: the AI never bans/removes/changes anything itself, it only
+// writes a flag here for an admin to look at and act on (or dismiss) using
+// the same Moderation/Reports tools already on this dashboard. Scans are
+// admin-triggered (the "Run fraud scan" button), never scheduled, so the
+// (paid, once enabled) API cost stays under the admin's control.
+function renderAiFlags() {
+  if (!state.aiEnabled) {
+    return `
+      <div class="panel">
+        <h2>AI Flags</h2>
+        <p class="muted">AI assistance isn't turned on yet - set ANTHROPIC_API_KEY as a backend secret to enable dispute triage, fraud scanning, and the other AI features.</p>
+      </div>`;
+  }
+  const rows = state.aiFraudFlags.map((f) => `
+    <tr>
+      <td>${escapeHtml(f.subject_type)}<div class="muted">${escapeHtml(f.subject_id)}</div></td>
+      <td>${escapeHtml(f.reason)}</td>
+      <td><span class="badge ${escapeHtml(f.severity)}">${escapeHtml(f.severity)}</span></td>
+      <td class="muted">${new Date(f.created_at).toLocaleString()}</td>
+      <td class="row-actions">
+        ${f.subject_type === "listing" ? `<a href="#" data-view-post="listing|${f.subject_id}">View post</a>` : ""}
+        ${f.resolved
+          ? `<span class="muted">resolved${f.resolution_note ? " - " + escapeHtml(f.resolution_note) : ""}</span>`
+          : `<button data-resolve-flag="${f.id}">Mark reviewed</button>`}
+      </td>
+    </tr>`).join("");
+  return `
+    ${renderPostPreview()}
+    <div class="panel">
+      <h2>AI Flags</h2>
+      <p class="muted">Suspicious listings the AI has flagged for review - advisory only, nothing here has been acted on automatically.</p>
+      <button data-run-fraud-scan ${state.aiFraudScanBusy ? "disabled" : ""}>${state.aiFraudScanBusy ? "Scanning..." : "Run fraud scan"}</button>
+      <table style="margin-top:12px">
+        <thead><tr><th>Subject</th><th>Reason</th><th>Severity</th><th>Flagged</th><th>Actions</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="5" class="muted">No unresolved flags.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+async function loadAiFraudFlags() {
+  await loadAiStatus();
+  if (!state.aiEnabled) { state.aiFraudFlags = []; return; }
+  try {
+    state.aiFraudFlags = await apiFetch("/ai/fraud-flags?resolved=false");
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+async function runFraudScan() {
+  state.aiFraudScanBusy = true;
+  render();
+  try {
+    const result = await apiFetch("/ai/fraud-scan", { method: "POST" });
+    if (result.enabled === false) {
+      toast("AI assistance isn't turned on yet.", "error");
+    } else if ((result.flags || []).length === 0) {
+      toast("Scan complete - nothing suspicious found.", "ok");
+    } else {
+      toast(`Scan complete - ${result.flags.length} listing(s) flagged.`, "ok");
+    }
+    await loadAiFraudFlags();
+  } catch (e) {
+    toast(e.message, "error");
+  } finally {
+    state.aiFraudScanBusy = false;
+    render();
+  }
+}
+
+async function resolveFraudFlag(id, note) {
+  try {
+    await apiFetch(`/ai/fraud-flags/${id}/resolve`, { method: "POST", body: { note } });
+    await loadAiFraudFlags();
+    render();
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+function wireAiFlagsActions() {
+  const scanBtn = document.querySelector("[data-run-fraud-scan]");
+  if (scanBtn) scanBtn.onclick = runFraudScan;
+  document.querySelectorAll("[data-resolve-flag]").forEach((b) => {
+    b.onclick = () => openModal({
+      title: "Mark flag reviewed",
+      fields: [{ name: "note", label: "Note (optional)", placeholder: "What did you find/do?" }],
+      submitLabel: "Mark reviewed",
+      onSubmit: (v) => resolveFraudFlag(b.dataset.resolveFlag, v.note),
+    });
+  });
 }
 
 function renderModeration() {
@@ -1459,6 +1629,32 @@ function renderVerification() {
       <table>
         <thead><tr><th>Document</th><th>Status</th><th>Submitted</th><th></th></tr></thead>
         <tbody>${rows || `<tr><td colspan="4" class="muted">No requests.</td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+// Logistics Partner Network - reviewing a company's application. Approving
+// sets profiles.is_logistics_partner, which is what unlocks the partner-only
+// screen in the Flutter app - see admin/index.ts's /logistics/applications/
+// :id/decide route.
+function renderLogisticsApplications() {
+  const rows = state.logisticsApplications.map((a) => `
+    <tr>
+      <td>${escapeHtml(a.companyName)}<div class="muted">${escapeHtml(a.contactPersonName)} · ${escapeHtml(a.contactPhone)}${a.contactEmail ? " · " + escapeHtml(a.contactEmail) : ""}</div></td>
+      <td>${escapeHtml(a.companyAddress)}${a.coverageAreas ? `<div class="muted">Covers: ${escapeHtml(a.coverageAreas)}</div>` : ""}${a.registrationNumber ? `<div class="muted">Reg: ${escapeHtml(a.registrationNumber)}</div>` : ""}</td>
+      <td class="muted">${new Date(a.createdAt).toLocaleDateString()}</td>
+      <td class="row-actions">
+        <button class="ok" data-decide-logistics="${a.id}" data-decision="approved">Approve</button>
+        <button class="danger" data-decide-logistics="${a.id}" data-decision="rejected">Reject</button>
+      </td>
+    </tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>Delivery partner applications</h2>
+      <p class="muted">Approving grants the applicant's account access to the in-app delivery-partner screen.</p>
+      <table>
+        <thead><tr><th>Company</th><th>Address / coverage</th><th>Applied</th><th>Decide</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="4" class="muted">No pending applications.</td></tr>`}</tbody>
       </table>
     </div>`;
 }
@@ -1766,9 +1962,11 @@ function renderListings() {
 const TAB_CONFIG = [
   { key: "withdrawals", label: "Withdrawals", ownerOnly: false, render: renderWithdrawals },
   { key: "disputes", label: "Disputes", ownerOnly: false, render: renderDisputes, load: loadDisputes },
+  { key: "aiFlags", label: "AI Flags", ownerOnly: false, render: renderAiFlags, load: loadAiFraudFlags },
   { key: "reports", label: "Reports", ownerOnly: false, render: renderReports, load: loadReports },
   { key: "moderation", label: "Moderation", ownerOnly: false, render: renderModeration },
   { key: "verification", label: "Verification", ownerOnly: false, render: renderVerification, load: loadVerifications },
+  { key: "logisticsApplications", label: "Delivery Partners", ownerOnly: false, render: renderLogisticsApplications, load: loadLogisticsApplications },
   { key: "contactFlags", label: "Contact Flags", ownerOnly: false, render: renderContactFlags, load: loadContactFlags },
   { key: "banEvasion", label: "Ban Evasion", ownerOnly: false, render: renderBanEvasion, load: loadBanEvasionFlags },
   { key: "bannedPhones", label: "Banned Phones", ownerOnly: false, render: renderBannedPhones, load: loadBannedPhones },
@@ -1825,9 +2023,11 @@ function renderDashboard() {
   wireStaffActions();
   wireSettingsActions();
   wireDisputeActions();
+  wireAiFlagsActions();
   wireReportActions();
   wireModerationActions();
   wireVerificationActions();
+  wireLogisticsActions();
   wireContactFlagActions();
   wireBanEvasionActions();
   wireCategoryActions();
@@ -2001,6 +2201,9 @@ function wireDisputeActions() {
   document.querySelectorAll("[data-load-evidence]").forEach((a) => {
     a.onclick = (ev) => { ev.preventDefault(); loadEvidence(a.dataset.loadEvidence); };
   });
+  document.querySelectorAll("[data-ai-suggest]").forEach((b) => {
+    b.onclick = () => askAiForDisputeSuggestion(b.dataset.aiSuggest);
+  });
   document.querySelectorAll("[data-open-chat]").forEach((b) => {
     b.onclick = async () => {
       const [agreementId, buyerId, sellerId] = b.dataset.openChat.split("|");
@@ -2026,6 +2229,20 @@ function wireReportActions() {
 }
 
 let userSearchDebounce = null;
+function wireLogisticsActions() {
+  document.querySelectorAll("[data-decide-logistics]").forEach((b) => {
+    b.onclick = () => {
+      const decision = b.dataset.decision;
+      openModal({
+        title: decision === "approved" ? "Approve delivery partner" : "Reject application",
+        fields: [{ name: "notes", label: "Notes (optional)" }],
+        submitLabel: decision === "approved" ? "Approve" : "Reject",
+        onSubmit: (v) => decideLogisticsApplication(b.dataset.decideLogistics, decision, v.notes),
+      });
+    };
+  });
+}
+
 function wireModerationActions() {
   const searchInput = document.getElementById("user-search-input");
   if (searchInput) {

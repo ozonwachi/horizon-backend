@@ -4,6 +4,7 @@ import { notifyAdminsOfDispute } from "./conversationService.ts";
 import { recordAuditLog } from "./auditLogService.ts";
 import { getAdminWalletUid } from "./walletLedgerService.ts";
 import { processReferralPayoutsForAgreement } from "./referralService.ts";
+import { createDeliveryForAgreementIfNeeded } from "./logisticsService.ts";
 
 const AGREEMENTS_TABLE = "escrow_agreements";
 const TRANCHES_TABLE = "escrow_tranches";
@@ -78,6 +79,9 @@ function toTranche(row: any) {
     releasedAt: row.released_at,
     overdueFlaggedAt: row.overdue_flagged_at,
     disputeReason: row.dispute_reason,
+    recipientId: row.recipient_id,
+    trancheType: row.tranche_type,
+    linkedItemTrancheId: row.linked_item_tranche_id,
     ...(row.admin_resolved_by
       ? {
           adminResolution: {
@@ -333,6 +337,16 @@ function buildTranches({ amountKobo, tranches, terms }: { amountKobo: number; tr
         amountKobo: t.amountKobo,
         releaseConditionType: t.releaseCondition.type,
         releaseAfterDays: t.releaseCondition.releaseAfterDays || null,
+        // Logistics Partner Network (optional, absent on every ordinary
+        // tranche): recipientId lets a tranche pay someone other than the
+        // seller (a logistics partner); trancheType distinguishes it from
+        // the sale itself; linkedItemTrancheIndex is the 0-based position
+        // of the item tranche THIS ONE rides along with, WITHIN THIS SAME
+        // tranches array - escrow_create_agreement resolves it to a real
+        // tranche id after insert. See migration_39.
+        ...(t.recipientId ? { recipientId: t.recipientId } : {}),
+        ...(t.trancheType ? { trancheType: t.trancheType } : {}),
+        ...(t.linkedItemTrancheIndex !== undefined ? { linkedItemTrancheIndex: t.linkedItemTrancheIndex } : {}),
       };
     });
   }
@@ -394,6 +408,13 @@ export async function createAgreement(
   if (error) throw new Error(error.message);
 
   const agreement = await getAgreement(supabase, agreementId);
+
+  // Logistics Partner Network: a no-op unless this agreement actually
+  // included a logistics tranche (see buildTranches above) - creates the
+  // deliveries row and notifies the assigned partner.
+  await createDeliveryForAgreementIfNeeded(supabase, agreement).catch((err) =>
+    console.error("createDeliveryForAgreementIfNeeded failed:", err)
+  );
 
   // Notify the other party that a deal was opened. The buyer already knows
   // (they just created it) - it's the seller who needs the heads up.
