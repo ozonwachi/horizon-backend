@@ -888,6 +888,28 @@ async function adminEditTranche(agreementId, trancheId, changes, reason) {
   } catch (e) { toast(e.message, "error"); }
 }
 
+async function adminEditAgreement(agreementId, changes, reason) {
+  try {
+    await apiFetch("/escrow/agreements/" + agreementId + "/admin", { method: "PATCH", body: { ...changes, reason } });
+    toast("Deal updated.", "ok");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+// decisions: { [trancheId]: 'release' | 'refund' | [{recipient, amountKobo}, ...] } -
+// same shape adminForceCancelDeal already accepts (mirrors
+// EscrowDetailScreen._forceCancelDeal in the app). Simple release/refund
+// per tranche covers the common case; the split-between-parties case is
+// entered as raw JSON since it's a rare, complex override, not worth a
+// dedicated multi-field UI here.
+async function adminForceCancelDeal(agreementId, decisions, reason) {
+  try {
+    await apiFetch("/escrow/agreements/" + agreementId + "/admin-force-cancel", { method: "POST", body: { decisions, reason } });
+    toast("Deal force-cancelled.", "ok");
+    await loadDisputes();
+    render();
+  } catch (e) { toast(e.message, "error"); }
+}
+
 // ---------------------------------------------------------------------------
 // Deal Support Chat - the live three-way buyer/seller/admin thread. Unlike
 // everything else in this dashboard, this writes straight to Postgres via
@@ -1660,6 +1682,32 @@ function renderTools() {
       <label>Reason (required)</label>
       <input id="edit-tranche-reason" type="text" />
       <button class="primary full" id="edit-tranche-btn">Save</button>
+    </div>
+    <div class="panel">
+      <h2>Edit a deal (admin)</h2>
+      <p class="muted">Correct the amount/title/description on any deal - e.g. refunding a transport cost after a job is cancelled mid-way. Amount edits are blocked once the deal is released/refunded/cancelled.</p>
+      <label>Agreement ID</label>
+      <input id="edit-agreement-id" type="text" />
+      <label>New title (optional)</label>
+      <input id="edit-agreement-title" type="text" />
+      <label>New description (optional)</label>
+      <input id="edit-agreement-description" type="text" />
+      <label>New amount (₦, optional)</label>
+      <input id="edit-agreement-amount" type="number" step="0.01" />
+      <label>Reason (required)</label>
+      <input id="edit-agreement-reason" type="text" />
+      <button class="primary full" id="edit-agreement-btn">Save</button>
+    </div>
+    <div class="panel">
+      <h2>Force-cancel a deal (admin)</h2>
+      <p class="muted">Ends the deal now, deciding release-or-refund for every tranche still open. No cap on amount - use carefully.</p>
+      <label>Agreement ID</label>
+      <input id="force-cancel-agreement" type="text" />
+      <label>Decisions (JSON) - e.g. <code>{"tranche-id-1": "refund", "tranche-id-2": [{"recipient":"buyer","amountKobo":500000},{"recipient":"seller","amountKobo":500000}]}</code></label>
+      <textarea id="force-cancel-decisions" rows="3"></textarea>
+      <label>Reason (required)</label>
+      <input id="force-cancel-reason" type="text" />
+      <button class="danger full" id="force-cancel-btn">Force Cancel</button>
     </div>`;
 }
 
@@ -2146,6 +2194,39 @@ function wireToolsActions() {
       document.getElementById("edit-tranche-tranche").value.trim(),
       changes,
       document.getElementById("edit-tranche-reason").value
+    );
+  };
+
+  const editAgreementBtn = document.getElementById("edit-agreement-btn");
+  if (editAgreementBtn) editAgreementBtn.onclick = () => {
+    const title = document.getElementById("edit-agreement-title").value;
+    const description = document.getElementById("edit-agreement-description").value;
+    const amount = document.getElementById("edit-agreement-amount").value;
+    const changes = {};
+    if (title) changes.title = title;
+    if (description) changes.description = description;
+    if (amount) changes.amountKobo = Math.round(Number(amount) * 100);
+    adminEditAgreement(
+      document.getElementById("edit-agreement-id").value.trim(),
+      changes,
+      document.getElementById("edit-agreement-reason").value
+    );
+  };
+
+  const forceCancelBtn = document.getElementById("force-cancel-btn");
+  if (forceCancelBtn) forceCancelBtn.onclick = () => {
+    let decisions;
+    try {
+      decisions = JSON.parse(document.getElementById("force-cancel-decisions").value || "{}");
+    } catch (e) {
+      toast("Decisions must be valid JSON.", "error");
+      return;
+    }
+    if (!confirm("Force-cancel this deal? This cannot be undone.")) return;
+    adminForceCancelDeal(
+      document.getElementById("force-cancel-agreement").value.trim(),
+      decisions,
+      document.getElementById("force-cancel-reason").value
     );
   };
 }
