@@ -142,26 +142,26 @@ export async function setAccountStatus(
     banned: {
       title: "Your account has been banned",
       body: reason
-        ? `Your Horizon account was banned: ${reason}`
-        : "Your Horizon account was banned for violating our terms.",
+        ? `Your Prexpa account was banned: ${reason}`
+        : "Your Prexpa account was banned for violating our terms.",
     },
     frozen: {
       title: "Your account has been frozen",
       body: reason
-        ? `Your Horizon account was frozen and money movement is paused: ${reason}`
-        : "Your Horizon account was frozen and money movement is paused.",
+        ? `Your Prexpa account was frozen and money movement is paused: ${reason}`
+        : "Your Prexpa account was frozen and money movement is paused.",
     },
     investigating: {
       title: "Your account is under review",
       body: reason
-        ? `Your Horizon account is under review: ${reason}`
-        : "Your Horizon account is under review. Browsing still works, but money movement is paused until this clears.",
+        ? `Your Prexpa account is under review: ${reason}`
+        : "Your Prexpa account is under review. Browsing still works, but money movement is paused until this clears.",
     },
     deactivated: {
       title: "Your account has been deactivated",
       body: reason
-        ? `Your Horizon account was deactivated: ${reason}`
-        : "Your Horizon account was deactivated.",
+        ? `Your Prexpa account was deactivated: ${reason}`
+        : "Your Prexpa account was deactivated.",
     },
   };
   const statusCopy = STATUS_COPY[status];
