@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.prexpa.app",
+      "sha256_cert_fingerprints": [
+        "74:0F:3B:CA:E7:93:05:8E:71:D0:EF:75:71:2D:27:EC:91:1A:83:EF:F2:B3:85:23:9E:84:E5:71:37:7F:BD:6D"
+      ]
+    }
+  }
+]

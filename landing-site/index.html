@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Prexpa</title>
+<style>
+  :root {
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #16233F;
+    color: #F5F7FA;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 24px;
+  }
+  .card {
+    max-width: 420px;
+    width: 100%;
+    text-align: center;
+  }
+  .logo {
+    width: 72px;
+    height: 72px;
+    border-radius: 18px;
+    background: #1F3A63;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 20px;
+    font-size: 32px;
+    font-weight: 700;
+  }
+  h1 {
+    font-size: 24px;
+    margin: 0 0 8px;
+  }
+  p.subtitle {
+    color: #B7C2D6;
+    margin: 0 0 28px;
+    line-height: 1.5;
+  }
+  .referral-box {
+    display: none;
+    background: #1F3A63;
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 24px;
+  }
+  .referral-box.visible { display: block; }
+  .referral-box .label {
+    color: #B7C2D6;
+    font-size: 13px;
+    margin-bottom: 6px;
+  }
+  .referral-box .code {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 2px;
+  }
+  .buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .store-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 14px 20px;
+    border-radius: 10px;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 15px;
+  }
+  .store-button.android {
+    background: #34C759;
+    color: #06210F;
+  }
+  .store-button.ios {
+    background: #2B3E5C;
+    color: #8393AD;
+    cursor: default;
+  }
+  .footer-note {
+    margin-top: 28px;
+    color: #6B7A96;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">P</div>
+    <h1 id="heading">Get the Prexpa app</h1>
+    <p class="subtitle" id="subtitle">
+      Buy, sell, and trade nearby with secure escrow payments - all in one app.
+    </p>
+
+    <div class="referral-box" id="referralBox">
+      <div class="label">You were invited! Your referral code:</div>
+      <div class="code" id="referralCode"></div>
+    </div>
+
+    <div class="buttons">
+      <a class="store-button android" id="androidButton" href="https://play.google.com/store/apps/details?id=com.prexpa.app">
+        Get it on Google Play
+      </a>
+      <div class="store-button ios">
+        Coming soon on iOS
+      </div>
+    </div>
+
+    <div class="footer-note">prexpa.com</div>
+  </div>
+
+  <script>
+    // If this is a referral link (prexpa.com/r/CODE), show the code so
+    // it's never lost even without the app installed yet - see
+    // DeepLinkService's doc comment for why this matters (a plain deep
+    // link tapped before installing is gone by the time someone reaches
+    // the Play Store and comes back). The code is also embedded in the
+    // Play Store link's `referrer` param, which Google Play carries
+    // through the install and the app reads back on first launch via the
+    // Play Install Referrer API - so most people never need to type it in
+    // by hand at all, but it's shown either way as a fallback.
+    (function () {
+      var match = window.location.pathname.match(/^\/r\/([A-Za-z0-9]+)/);
+      if (!match) return;
+      var code = match[1];
+
+      document.getElementById('heading').textContent = "You're invited to Prexpa";
+      document.getElementById('subtitle').textContent =
+        'Buy, sell, and trade nearby with secure escrow payments - all in one app.';
+
+      var box = document.getElementById('referralBox');
+      box.classList.add('visible');
+      document.getElementById('referralCode').textContent = code;
+
+      var androidButton = document.getElementById('androidButton');
+      var referrer = encodeURIComponent('ref_code=' + code);
+      androidButton.href =
+        'https://play.google.com/store/apps/details?id=com.prexpa.app&referrer=' + referrer;
+    })();
+  </script>
+</body>
+</html>

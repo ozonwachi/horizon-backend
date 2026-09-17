@@ -1,0 +1,9 @@
+{
+  "rewrites": [
+    { "source": "/listing/:id", "destination": "/index.html" },
+    { "source": "/job/:id", "destination": "/index.html" },
+    { "source": "/barter/:id", "destination": "/index.html" },
+    { "source": "/deal/:id", "destination": "/index.html" },
+    { "source": "/r/:code", "destination": "/index.html" }
+  ]
+}
