@@ -25,6 +25,7 @@ import {
   updateContactShareFlagStatus,
   getFlaggedConversation,
 } from "../_shared/contactFlagService.ts";
+import { listDeliveriesForAdmin } from "../_shared/logisticsService.ts";
 import { listBanEvasionFlags, updateBanEvasionFlagStatus } from "../_shared/banEvasionService.ts";
 import { listAllCategories, createCategory, updateCategory, deleteCategory } from "../_shared/categoryService.ts";
 import { listAllRegions, createRegion, updateRegion, deleteRegion } from "../_shared/regionService.ts";
@@ -352,6 +353,15 @@ app.get("/contact-flags/:id/conversation", async (c) => {
     return c.json(view);
   } catch (err) {
     console.error("Get flagged conversation failed:", err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.get("/deliveries", async (c) => {
+  try {
+    return c.json({ deliveries: await listDeliveriesForAdmin(getAdminClient()) });
+  } catch (err) {
+    console.error("List deliveries failed:", err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
   }
 });

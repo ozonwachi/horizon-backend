@@ -168,6 +168,7 @@ export async function enrichDeliveries(supabase: SupabaseClient, rows: any[]) {
       inTransitAt: row.in_transit_at,
       deliveredAt: row.delivered_at,
       createdAt: row.created_at,
+      updatedAt: row.updated_at,
       agreedAmountKobo: row.agreed_amount_kobo,
       deliveryAgreementId: row.delivery_agreement_id,
       // "in_deal": the delivery price sits in the item deal as its own
@@ -597,4 +598,27 @@ export async function getHandoverPhotoUrl(
     .createSignedUrl(delivery.handover_photo_path, 3600);
   if (error) throw error;
   return data.signedUrl;
+}
+
+// Admin overview of recent deliveries, each with a short-lived signed URL for
+// the seller's handover photo (when there is one) so the dashboard can show it
+// inline. Admin-only - the caller (admin function) enforces that.
+export async function listDeliveriesForAdmin(supabase: SupabaseClient, limit = 100) {
+  const { data, error } = await supabase
+    .from(DELIVERIES_TABLE)
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  const rows = data || [];
+  const enriched = await enrichDeliveries(supabase, rows);
+  return await Promise.all(
+    // deno-lint-ignore no-explicit-any
+    enriched.map(async (d: any, i: number) => {
+      const path = rows[i].handover_photo_path;
+      if (!path) return { ...d, handoverPhotoUrl: null };
+      const { data: signed } = await supabase.storage.from("delivery-photos").createSignedUrl(path, 3600);
+      return { ...d, handoverPhotoUrl: signed?.signedUrl ?? null };
+    })
+  );
 }

@@ -172,6 +172,8 @@ const state = {
   verifications: [],
   verificationDetail: null, // { ...request, applicantName, frontUrl, backUrl, selfieUrl }
   contactFlags: [],
+  deliveries: [],
+  deliveryPhoto: null,
   banEvasionFlags: [],
   bannedPhones: [],
   categories: [],
@@ -380,6 +382,11 @@ async function loadVerificationDetail(id) {
   render();
 }
 
+async function loadDeliveries() {
+  const r = await apiFetch("/admin/deliveries");
+  state.deliveries = r.deliveries || [];
+}
+
 async function loadContactFlags() {
   const r = await apiFetch("/admin/contact-flags");
   state.contactFlags = r.flags;
@@ -506,8 +513,14 @@ async function loadPostPreview(type, id) {
 }
 
 async function loadFlaggedConversation(flagId) {
-  state.flaggedConversation = await apiFetch("/admin/contact-flags/" + flagId + "/conversation");
-  render();
+  try {
+    const fc = await apiFetch("/admin/contact-flags/" + flagId + "/conversation");
+    const flag = (state.contactFlags || []).find((f) => f.id === flagId);
+    state.flaggedConversation = { ...fc, matchedSnippet: flag ? flag.matchedSnippet : "" };
+    render();
+  } catch (e) {
+    toast("Could not load conversation: " + (e.message || e), "error");
+  }
 }
 
 // The dispute/deal "Evidence" - admin-action history scoped to this deal,
@@ -1662,13 +1675,63 @@ function renderLogisticsApplications() {
 function renderFlaggedConversation() {
   const fc = state.flaggedConversation;
   if (!fc) return "";
-  const msgs = (fc.messages || []).map((m) => `<div class="approvals-line"><strong>${escapeHtml(m.senderName)}:</strong> ${escapeHtml(m.text)}</div>`).join("") || `<div class="muted">No messages.</div>`;
+  const snip = (fc.matchedSnippet || "").trim();
+  const msgs = (fc.messages || []).map((m) => {
+    const hit = snip && String(m.text || "").includes(snip);
+    const when = m.sentAt ? new Date(m.sentAt).toLocaleString() : "";
+    return `<div class="approvals-line" style="${hit ? "background:rgba(255,80,80,.15);border-left:3px solid var(--danger);padding-left:8px;" : ""}">
+      <strong>${escapeHtml(m.senderName || "")}:</strong> ${escapeHtml(m.text || "")}
+      <div class="muted" style="font-size:11px">${escapeHtml(when)}${hit ? " - flagged message" : ""}</div></div>`;
+  }).join("") || `<div class="muted">No messages.</div>`;
+  return `
+    <div class="modal-backdrop" id="flagged-backdrop">
+      <div class="modal" style="max-width:560px;max-height:80vh;overflow:auto">
+        <h3>Flagged conversation ${fc.relatedItemTitle ? "- " + escapeHtml(fc.relatedItemTitle) : ""}</h3>
+        ${msgs}
+        <div class="actions"><button id="close-flagged-conversation">Close</button></div>
+      </div>
+    </div>`;
+}
+
+function renderDeliveries() {
+  const rows = state.deliveries.map((d) => {
+    const photo = d.handoverPhotoUrl
+      ? `<a href="#" data-delivery-photo="${d.id}"><img src="${escapeHtml(d.handoverPhotoUrl)}" alt="Handover photo" style="width:64px;height:64px;object-fit:cover;border-radius:6px;display:block"/></a>`
+      : (d.hasHandoverPhoto ? `<span class="muted">Could not load</span>` : `<span class="muted">None</span>`);
+    const price = d.agreedAmountKobo ? "N" + (d.agreedAmountKobo / 100).toLocaleString() : "-";
+    return `<tr>
+      <td>${escapeHtml(d.deal?.title || "(deal)")}<div class="muted">${new Date(d.createdAt).toLocaleString()}</div></td>
+      <td>Buyer: ${escapeHtml(d.buyerName)}<div class="muted">Seller: ${escapeHtml(d.sellerName)}</div></td>
+      <td>${escapeHtml(d.partnerName)}</td>
+      <td><span class="badge ${escapeHtml(d.status)}">${escapeHtml(d.status)}</span></td>
+      <td>${price}</td>
+      <td>${photo}</td>
+    </tr>`;
+  }).join("");
   return `
     <div class="panel">
-      <h2>Flagged conversation ${fc.relatedItemTitle ? "- " + escapeHtml(fc.relatedItemTitle) : ""}</h2>
-      ${msgs}
-      <button id="close-flagged-conversation" style="margin-top:12px">Close</button>
-    </div>`;
+      <h2>In-app deliveries</h2>
+      <table>
+        <thead><tr><th>Deal</th><th>Buyer / Seller</th><th>Partner</th><th>Status</th><th>Agreed price</th><th>Handover photo</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="6" class="muted">No deliveries yet.</td></tr>`}</tbody>
+      </table>
+    </div>
+    ${state.deliveryPhoto ? `<div class="modal-backdrop" id="delivery-photo-backdrop"><div class="modal" style="max-width:720px"><img src="${escapeHtml(state.deliveryPhoto)}" style="width:100%;border-radius:8px"/><div class="actions"><button id="close-delivery-photo">Close</button></div></div></div>` : ""}`;
+}
+
+function wireDeliveryActions() {
+  document.querySelectorAll("[data-delivery-photo]").forEach((a) => {
+    a.onclick = (ev) => {
+      ev.preventDefault();
+      const d = state.deliveries.find((x) => x.id === a.dataset.deliveryPhoto);
+      if (d) { state.deliveryPhoto = d.handoverPhotoUrl; render(); }
+    };
+  });
+  const close = () => { state.deliveryPhoto = null; render(); };
+  const cb = document.getElementById("close-delivery-photo");
+  if (cb) cb.onclick = close;
+  const bd = document.getElementById("delivery-photo-backdrop");
+  if (bd) bd.onclick = (ev) => { if (ev.target === bd) close(); };
 }
 
 function renderContactFlags() {
@@ -1967,6 +2030,7 @@ const TAB_CONFIG = [
   { key: "moderation", label: "Moderation", ownerOnly: false, render: renderModeration },
   { key: "verification", label: "Verification", ownerOnly: false, render: renderVerification, load: loadVerifications },
   { key: "logisticsApplications", label: "Delivery Partners", ownerOnly: false, render: renderLogisticsApplications, load: loadLogisticsApplications },
+  { key: "deliveries", label: "Deliveries", ownerOnly: false, render: renderDeliveries, load: loadDeliveries },
   { key: "contactFlags", label: "Contact Flags", ownerOnly: false, render: renderContactFlags, load: loadContactFlags },
   { key: "banEvasion", label: "Ban Evasion", ownerOnly: false, render: renderBanEvasion, load: loadBanEvasionFlags },
   { key: "bannedPhones", label: "Banned Phones", ownerOnly: false, render: renderBannedPhones, load: loadBannedPhones },
@@ -2039,6 +2103,7 @@ function renderDashboard() {
   wireListingsActions();
   wireModal();
   wireChatPanel();
+  wireDeliveryActions();
 }
 
 function wireWithdrawalActions() {
@@ -2297,6 +2362,8 @@ function wireContactFlagActions() {
   });
   const closeBtn = document.getElementById("close-flagged-conversation");
   if (closeBtn) closeBtn.onclick = () => { state.flaggedConversation = null; render(); };
+  const fb = document.getElementById("flagged-backdrop");
+  if (fb) fb.onclick = (ev) => { if (ev.target === fb) { state.flaggedConversation = null; render(); } };
 }
 
 function wireBanEvasionActions() {
