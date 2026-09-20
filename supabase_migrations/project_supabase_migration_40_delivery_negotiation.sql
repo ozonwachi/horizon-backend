@@ -13,8 +13,9 @@
 --        - item deal NOT yet paid  -> added to that same deal as its own
 --          'logistics' tranche (escrow_add_delivery_tranche below), so the
 --          buyer still makes ONE payment, with delivery and seller money in
---          separate tranches (released together when the item tranche is,
---          exactly as migration_39's escrow_release_tranche already does).
+--          separate tranches that are RELEASED SEPARATELY (see migration_41 -
+--          run it too, it removes migration_39's auto-release of the
+--          delivery tranche alongside the item tranche).
 --        - item deal ALREADY paid  -> a separate escrow agreement of type
 --          'delivery' (buyer -> partner) that the buyer pays on its own; no
 --          new SQL needed for that, it reuses escrow_create_agreement.
@@ -98,8 +99,9 @@ begin
     raise exception 'Delivery amount must be positive';
   end if;
 
-  -- Ride along with the LAST item tranche - the one that most naturally
-  -- means "the deal is done" (the only one, in a simple buy-now deal).
+  -- Recorded against the LAST item tranche (the only one, in a simple
+  -- buy-now deal) so it's clear what the delivery fee belongs to. It is
+  -- released on its own - see migration_41.
   select * into v_item from public.escrow_tranches
     where agreement_id = p_agreement_id and tranche_type = 'item' and status = 'pending'
     order by created_at desc, id

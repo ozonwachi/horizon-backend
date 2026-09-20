@@ -300,7 +300,7 @@ export async function acceptCurrentOffer(supabase: SupabaseClient, deliveryId: s
       body:
         dto.mode === "separate"
           ? `${dto.partnerName} accepted ${price}. Pay it to start your delivery.`
-          : `${dto.partnerName} accepted ${price}. It's added to your deal - pay to confirm both.`,
+          : `${dto.partnerName} accepted ${price}. It's added to your deal as its own tranche - pay the deal to start the delivery.`,
       relatedType: "escrow",
       relatedId: buyerTarget,
       important: true,
