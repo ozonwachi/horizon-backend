@@ -14,7 +14,15 @@ import {
   updateDeliveryStatus,
   setHandoverPhoto,
   getHandoverPhotoUrl,
+  getDeliveryDetail,
 } from "../_shared/logisticsService.ts";
+import {
+  requestDelivery,
+  counterOffer,
+  acceptCurrentOffer,
+  declineDelivery,
+  cancelDelivery,
+} from "../_shared/deliveryNegotiationService.ts";
 
 // Logistics Partner Network (user/partner-facing routes) - admin review of
 // applications lives in admin/index.ts alongside the rest of the admin
@@ -103,6 +111,87 @@ app.get("/agreements/:agreementId/deliveries", async (c) => {
   } catch (err) {
     console.error("List agreement deliveries failed:", err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+// --- Price negotiation (migration_40) ---------------------------------------
+// The buyer opens a request with a first offer; nothing is charged or added
+// to any tranche until both sides agree a price.
+app.post("/deliveries", async (c) => {
+  const supabase = getAdminClient();
+  const user = c.get("user");
+  const body = await c.req.json().catch(() => ({}));
+
+  const limited = await rateLimitOrRespond(supabase, `delivery-request:${user.uid}`, { max: 30, windowSeconds: 3600 }, c);
+  if (limited) return limited;
+
+  try {
+    const delivery = await requestDelivery(supabase, user.uid, {
+      agreementId: body?.agreementId,
+      partnerId: body?.partnerId,
+      amountKobo: body?.amountKobo,
+      note: body?.note,
+    });
+    return c.json(delivery, 201);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.get("/deliveries/:id", async (c) => {
+  const supabase = getAdminClient();
+  const user = c.get("user");
+  try {
+    const delivery = await getDeliveryDetail(supabase, c.req.param("id")!, user.uid, user.isAdmin);
+    return c.json(delivery);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.post("/deliveries/:id/counter", async (c) => {
+  const supabase = getAdminClient();
+  const user = c.get("user");
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    const delivery = await counterOffer(supabase, c.req.param("id")!, user.uid, body?.amountKobo, body?.note);
+    return c.json(delivery);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.post("/deliveries/:id/accept-offer", async (c) => {
+  const supabase = getAdminClient();
+  const user = c.get("user");
+  try {
+    const delivery = await acceptCurrentOffer(supabase, c.req.param("id")!, user.uid);
+    return c.json(delivery);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.post("/deliveries/:id/decline", async (c) => {
+  const supabase = getAdminClient();
+  const user = c.get("user");
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    const delivery = await declineDelivery(supabase, c.req.param("id")!, user.uid, body?.reason);
+    return c.json(delivery);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.post("/deliveries/:id/cancel", async (c) => {
+  const supabase = getAdminClient();
+  const user = c.get("user");
+  try {
+    const delivery = await cancelDelivery(supabase, c.req.param("id")!, user.uid);
+    return c.json(delivery);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
   }
 });
 
