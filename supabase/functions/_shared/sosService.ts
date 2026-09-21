@@ -40,12 +40,12 @@ export function parseLocation(raw: Row): SosLocation | null {
   if (!raw || raw.latitude == null || raw.longitude == null) return null;
   const latitude = Number(raw.latitude);
   const longitude = Number(raw.longitude);
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) throw new Error("Invalid location.");
-  if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) throw new Error("Invalid location.");
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) throw new SosError("Invalid location.");
+  if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) throw new SosError("Invalid location.");
   let accuracy: number | null = null;
   if (raw.accuracy != null) {
     accuracy = Number(raw.accuracy);
-    if (!Number.isFinite(accuracy) || accuracy < 0) throw new Error("Invalid location accuracy.");
+    if (!Number.isFinite(accuracy) || accuracy < 0) throw new SosError("Invalid location accuracy.");
   }
   return { latitude, longitude, accuracy };
 }
@@ -325,6 +325,26 @@ export async function respondToInvite(
   if (!row || !addressedToMe || row.owner_user_id === uid) throw new SosError("Invitation not found.", 404);
 
   const now = new Date().toISOString();
+
+  // The same person can end up invited twice by one owner (e.g. by phone and
+  // by account). Fold the duplicate into the existing entry rather than
+  // tripping the one-entry-per-person index.
+  const { data: existing } = await supabase
+    .from(CONTACTS)
+    .select("id")
+    .eq("owner_user_id", row.owner_user_id)
+    .eq("contact_user_id", uid)
+    .in("status", ["pending", "active"])
+    .neq("id", row.id)
+    .maybeSingle();
+  if (existing) {
+    await supabase
+      .from(CONTACTS)
+      .update({ status: "removed", alerts_enabled: false, invite_code: null, updated_at: now })
+      .eq("id", row.id);
+    row.id = existing.id;
+  }
+
   const { error: upErr } = await supabase
     .from(CONTACTS)
     .update(

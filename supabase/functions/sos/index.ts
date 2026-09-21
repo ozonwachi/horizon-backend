@@ -96,7 +96,7 @@ app.post("/circle/respond", async (c) => {
 app.post("/activate", async (c) => {
   const supabase = getAdminClient();
   const user = c.get("user");
-  const limited = await rateLimitOrRespond(supabase, `sos-activate:${user.uid}`, { max: 6, windowSeconds: 3600 }, c);
+  const limited = await rateLimitOrRespond(supabase, `sos-activate:${user.uid}`, { max: 20, windowSeconds: 3600 }, c);
   if (limited) return limited;
   const body = await c.req.json().catch(() => ({}));
   try {
