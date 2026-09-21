@@ -25,6 +25,13 @@ import {
   updateContactShareFlagStatus,
   getFlaggedConversation,
 } from "../_shared/contactFlagService.ts";
+import {
+  SosError,
+  listAlertsForAdmin,
+  getAlertForAdmin,
+  adminAlertAction,
+  adminSetSosRestriction,
+} from "../_shared/sosService.ts";
 import { listDeliveriesForAdmin } from "../_shared/logisticsService.ts";
 import { listBanEvasionFlags, updateBanEvasionFlagStatus } from "../_shared/banEvasionService.ts";
 import { listAllCategories, createCategory, updateCategory, deleteCategory } from "../_shared/categoryService.ts";
@@ -363,6 +370,64 @@ app.get("/deliveries", async (c) => {
   } catch (err) {
     console.error("List deliveries failed:", err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+// ---- Safety / SOS ----------------------------------------------------------
+// Exact emergency location, identity and audit history are sensitive: the list
+// (no coordinates) is open to any 2FA'd staff, but detail, actions and access
+// restrictions need the OWNER staff role (requireOwnerRole). Every one of these
+// calls writes to emergency_audit_logs.
+// deno-lint-ignore no-explicit-any
+function sosFail(c: any, err: unknown) {
+  if (err instanceof SosError) return c.json({ error: err.message }, err.status);
+  console.error("Admin SOS route failed:", err);
+  return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+}
+
+app.get("/sos/active", async (c) => {
+  try {
+    return c.json({ alerts: await listAlertsForAdmin(getAdminClient(), c.get("user").uid, "active") });
+  } catch (err) {
+    return sosFail(c, err);
+  }
+});
+
+app.get("/sos", async (c) => {
+  const f = c.req.query("filter");
+  try {
+    const filter = f === "flagged" || f === "active" ? f : "all";
+    return c.json({ alerts: await listAlertsForAdmin(getAdminClient(), c.get("user").uid, filter) });
+  } catch (err) {
+    return sosFail(c, err);
+  }
+});
+
+app.post("/sos/restriction", requireOwnerRole, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    return c.json(
+      await adminSetSosRestriction(getAdminClient(), c.get("user").uid, String(body?.userId || ""), body?.restricted === true, String(body?.reason || ""))
+    );
+  } catch (err) {
+    return sosFail(c, err);
+  }
+});
+
+app.get("/sos/:id", requireOwnerRole, async (c) => {
+  try {
+    return c.json(await getAlertForAdmin(getAdminClient(), c.get("user").uid, c.req.param("id")!));
+  } catch (err) {
+    return sosFail(c, err);
+  }
+});
+
+app.post("/sos/:id/action", requireOwnerRole, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    return c.json(await adminAlertAction(getAdminClient(), c.get("user").uid, c.req.param("id")!, { action: String(body?.action || ""), note: body?.note }));
+  } catch (err) {
+    return sosFail(c, err);
   }
 });
 

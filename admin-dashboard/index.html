@@ -173,6 +173,9 @@ const state = {
   verificationDetail: null, // { ...request, applicantName, frontUrl, backUrl, selfieUrl }
   contactFlags: [],
   deliveries: [],
+  sosAlerts: [],
+  sosFilter: "active",
+  sosDetail: null,
   deliveryPhoto: null,
   banEvasionFlags: [],
   bannedPhones: [],
@@ -380,6 +383,43 @@ async function loadVerifications() {
 async function loadVerificationDetail(id) {
   state.verificationDetail = await apiFetch("/admin/verifications/" + id);
   render();
+}
+
+async function loadSosAlerts() {
+  const r = await apiFetch("/admin/sos?filter=" + encodeURIComponent(state.sosFilter));
+  state.sosAlerts = r.alerts || [];
+}
+
+async function openSosDetail(id) {
+  try {
+    state.sosDetail = await apiFetch("/admin/sos/" + id);
+    render();
+  } catch (e) {
+    toast("Could not open alert: " + (e.message || e), "error");
+  }
+}
+
+async function sosAction(id, action, note) {
+  try {
+    await apiFetch("/admin/sos/" + id + "/action", { method: "POST", body: JSON.stringify({ action, note }) });
+    toast("Done", "ok");
+    await loadSosAlerts();
+    state.sosDetail = await apiFetch("/admin/sos/" + id);
+    render();
+  } catch (e) {
+    toast(e.message || String(e), "error");
+  }
+}
+
+async function sosRestrict(userId, restricted, reason, alertId) {
+  try {
+    await apiFetch("/admin/sos/restriction", { method: "POST", body: JSON.stringify({ userId, restricted, reason }) });
+    toast(restricted ? "SOS access restricted" : "SOS access restored", "ok");
+    if (alertId) state.sosDetail = await apiFetch("/admin/sos/" + alertId);
+    render();
+  } catch (e) {
+    toast(e.message || String(e), "error");
+  }
 }
 
 async function loadDeliveries() {
@@ -1693,6 +1733,102 @@ function renderFlaggedConversation() {
     </div>`;
 }
 
+function renderSosAlerts() {
+  const filters = ["active", "flagged", "all"].map((f) => `<button data-sos-filter="${f}" class="${state.sosFilter === f ? "active" : ""}">${f[0].toUpperCase() + f.slice(1)}</button>`).join(" ");
+  const rows = state.sosAlerts.map((a) => `<tr>
+    <td>${escapeHtml(a.userName)}<div class="muted">${new Date(a.activatedAt).toLocaleString()}</div></td>
+    <td><span class="badge ${escapeHtml(a.status)}">${escapeHtml(a.status)}</span>${a.flagged ? ` <span class="badge open" title="${escapeHtml(a.flagReason || "")}">flagged</span>` : ""}${a.preserved ? " (held)" : ""}</td>
+    <td>${escapeHtml(a.emergencyType || "-")}</td>
+    <td>${a.recipients} notified, ${a.acknowledged} seen, ${a.helpContacted} say help contacted</td>
+    <td>${a.hasLocation ? "Yes" : "None"}</td>
+    <td class="row-actions"><button data-sos-open="${a.id}">Open</button></td>
+  </tr>`).join("");
+  return `
+    <div class="panel">
+      <h2>SOS Alerts</h2>
+      <div class="muted" style="margin-bottom:10px">Exact location, identity and the audit trail need the owner role, and every time they are opened it is recorded. Horizon does not contact emergency services itself - only circle members can confirm that.</div>
+      <div style="margin-bottom:12px">${filters} <button id="sos-refresh">Refresh</button></div>
+      <table>
+        <thead><tr><th>User</th><th>Status</th><th>Type</th><th>Circle response</th><th>Location</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="6" class="muted">No alerts.</td></tr>`}</tbody>
+      </table>
+    </div>
+    ${renderSosDetail()}`;
+}
+
+function renderSosDetail() {
+  const d = state.sosDetail;
+  if (!d) return "";
+  const loc = d.lastLocation || d.initialLocation;
+  const mapLink = loc ? `https://www.google.com/maps/search/?api=1&query=${loc.latitude},${loc.longitude}` : null;
+  const audit = (d.audit || []).map((a) => `<div class="approvals-line"><span class="muted">${new Date(a.timestamp).toLocaleString()}</span> - <strong>${escapeHtml(a.action)}</strong> <span class="muted">(${escapeHtml(a.actorRole)}${a.actorUserId ? " " + escapeHtml(a.actorUserId.slice(0, 8)) : ""})</span> ${a.metadata && Object.keys(a.metadata).length ? `<span class="muted mono">${escapeHtml(JSON.stringify(a.metadata))}</span>` : ""}</div>`).join("");
+  const recips = (d.recipients || []).map((r) => `<div class="approvals-line">${escapeHtml(r.name)} ${r.phoneNumber ? "(" + escapeHtml(r.phoneNumber) + ")" : ""} - notified ${r.notifiedAt ? new Date(r.notifiedAt).toLocaleTimeString() : "no"}, seen ${r.acknowledgedAt ? new Date(r.acknowledgedAt).toLocaleTimeString() : "no"}${r.helpContactedAt ? ", reports contacting emergency services at " + new Date(r.helpContactedAt).toLocaleTimeString() : ""}</div>`).join("") || `<div class="muted">None</div>`;
+  const u = d.user;
+  return `
+    <div class="modal-backdrop" id="sos-backdrop">
+      <div class="modal" style="max-width:760px;max-height:85vh;overflow:auto">
+        <h3>SOS ${escapeHtml(d.status)} - ${escapeHtml(u ? u.name : "Unknown")}</h3>
+        <div class="muted">Activated ${new Date(d.activatedAt).toLocaleString()} - type ${escapeHtml(d.emergencyType || "not chosen")} - method ${escapeHtml(d.activationMethod)} - ${d.totalAlertsByUser} alert(s) from this user overall</div>
+        ${u ? `<div class="approvals-line">Identity: ${escapeHtml(u.name)} - ${escapeHtml(u.phone || "no phone")} - ${escapeHtml(u.email || "")} - trust level ${escapeHtml(u.trustLevel)}${u.sosRestricted ? " - <strong>SOS RESTRICTED</strong>: " + escapeHtml(u.sosRestrictedReason || "") : ""}</div>` : ""}
+        <div class="approvals-line">Location: ${loc ? `<a href="${mapLink}" target="_blank" rel="noopener">${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)}</a> (accuracy ${loc.accuracy != null ? Math.round(loc.accuracy) + " m" : "unknown"})${d.lastLocation && d.lastLocation.recordedAt ? " last update " + new Date(d.lastLocation.recordedAt).toLocaleString() : ""}` : "no location was ever received"} - ${(d.locations || []).length} fixes recorded</div>
+        ${d.flagged ? `<div class="approvals-line">Flagged: ${escapeHtml(d.flagReason || "")}</div>` : ""}
+        ${d.adminNote ? `<div class="approvals-line">Admin note: ${escapeHtml(d.adminNote)}</div>` : ""}
+        <div class="muted" style="font-weight:600;margin:10px 0 4px">Circle members alerted</div>${recips}
+        <div class="muted" style="font-weight:600;margin:10px 0 4px">Audit trail (append-only)</div>${audit}
+        <div class="row-actions" style="margin-top:14px;flex-wrap:wrap">
+          ${d.flagged ? `<button data-sos-act="unflag">Clear flag</button>` : `<button data-sos-act="flag">Flag for review</button>`}
+          <button data-sos-act="mark_review">Mark for review</button>
+          <button data-sos-act="note">Add note</button>
+          <button data-sos-act="${d.preserved ? "unpreserve" : "preserve"}">${d.preserved ? "Release record hold" : "Preserve record"}</button>
+          ${u ? (u.sosRestricted ? `<button data-sos-restrict="restore">Restore SOS access</button>` : `<button data-sos-restrict="restrict">Restrict SOS access</button>`) : ""}
+        </div>
+        <div class="actions"><button id="close-sos-detail">Close</button></div>
+      </div>
+    </div>`;
+}
+
+function wireSosActions() {
+  document.querySelectorAll("[data-sos-filter]").forEach((b) => {
+    b.onclick = async () => {
+      state.sosFilter = b.dataset.sosFilter;
+      try { await loadSosAlerts(); } catch (e) { toast(e.message || String(e), "error"); }
+      render();
+    };
+  });
+  const rf = document.getElementById("sos-refresh");
+  if (rf) rf.onclick = async () => {
+    try { await loadSosAlerts(); } catch (e) { toast(e.message || String(e), "error"); }
+    render();
+  };
+  document.querySelectorAll("[data-sos-open]").forEach((b) => { b.onclick = () => openSosDetail(b.dataset.sosOpen); });
+  const d = state.sosDetail;
+  const close = () => { state.sosDetail = null; render(); };
+  const cb = document.getElementById("close-sos-detail");
+  if (cb) cb.onclick = close;
+  const bd = document.getElementById("sos-backdrop");
+  if (bd) bd.onclick = (ev) => { if (ev.target === bd) close(); };
+  if (!d) return;
+  document.querySelectorAll("[data-sos-act]").forEach((b) => {
+    b.onclick = () => {
+      const act = b.dataset.sosAct;
+      let note = "";
+      if (act === "flag" || act === "note") {
+        note = prompt(act === "flag" ? "Reason for flagging this alert:" : "Note:") || "";
+        if (!note.trim()) return;
+      }
+      sosAction(d.id, act, note);
+    };
+  });
+  document.querySelectorAll("[data-sos-restrict]").forEach((b) => {
+    b.onclick = () => {
+      const restrict = b.dataset.sosRestrict === "restrict";
+      const reason = prompt(restrict ? "Reason for restricting this user's SOS access (an admin decision, recorded in the audit trail):" : "Reason for restoring SOS access:") || "";
+      if (!reason.trim()) return;
+      sosRestrict(d.user.uid, restrict, reason, d.id);
+    };
+  });
+}
+
 function renderDeliveries() {
   const rows = state.deliveries.map((d) => {
     const photo = d.handoverPhotoUrl
@@ -2030,6 +2166,7 @@ const TAB_CONFIG = [
   { key: "moderation", label: "Moderation", ownerOnly: false, render: renderModeration },
   { key: "verification", label: "Verification", ownerOnly: false, render: renderVerification, load: loadVerifications },
   { key: "logisticsApplications", label: "Delivery Partners", ownerOnly: false, render: renderLogisticsApplications, load: loadLogisticsApplications },
+  { key: "sos", label: "SOS Alerts", ownerOnly: false, render: renderSosAlerts, load: loadSosAlerts },
   { key: "deliveries", label: "Deliveries", ownerOnly: false, render: renderDeliveries, load: loadDeliveries },
   { key: "contactFlags", label: "Contact Flags", ownerOnly: false, render: renderContactFlags, load: loadContactFlags },
   { key: "banEvasion", label: "Ban Evasion", ownerOnly: false, render: renderBanEvasion, load: loadBanEvasionFlags },
@@ -2104,6 +2241,7 @@ function renderDashboard() {
   wireModal();
   wireChatPanel();
   wireDeliveryActions();
+  wireSosActions();
 }
 
 function wireWithdrawalActions() {
