@@ -83,6 +83,16 @@ export type FlaggedConversationView = {
   conversationId: string;
   relatedItemTitle: string | null;
   messages: FlaggedConversationMessage[];
+  participants: { id: string; name: string }[];
+  // Everything else these same people have said to each other on Horizon
+  // (other deals/jobs/listings), so an admin sees the whole relationship, not
+  // one thread - a lone "081..." in a deal chat reads very differently next to
+  // the rest of what they've been saying.
+  otherThreads: {
+    conversationId: string;
+    relatedItemTitle: string | null;
+    messages: FlaggedConversationMessage[];
+  }[];
 };
 
 // Requested feature: let an admin read the full thread a contact-share
@@ -112,7 +122,7 @@ export async function getFlaggedConversation(
 
   const { data: conversation, error: conversationError } = await supabase
     .from("conversations")
-    .select("id, participant_names, related_item_title")
+    .select("id, participant_ids, participant_names, related_item_title")
     .eq("id", conversationId)
     .maybeSingle();
   if (conversationError) throw conversationError;
@@ -135,9 +145,49 @@ export async function getFlaggedConversation(
     sentAt: r.sent_at,
   }));
 
+  const participantIds: string[] = (conversation?.participant_ids as string[]) || [];
+  const participants = participantIds.map((id) => ({ id, name: names[id] || "(unknown)" }));
+
+  let otherThreads: FlaggedConversationView["otherThreads"] = [];
+  if (participantIds.length >= 2) {
+    const { data: siblings } = await supabase
+      .from("conversations")
+      .select("id, related_item_title, participant_names, last_message_at")
+      .contains("participant_ids", participantIds)
+      .neq("id", conversationId)
+      .order("last_message_at", { ascending: false, nullsFirst: false })
+      .limit(10);
+    const siblingIds = (siblings || []).map((c) => c.id as string);
+    if (siblingIds.length > 0) {
+      const { data: siblingRows } = await supabase
+        .from("messages")
+        .select("id, conversation_id, sender_id, text, sent_at")
+        .in("conversation_id", siblingIds)
+        .order("sent_at", { ascending: true })
+        .limit(500);
+      otherThreads = (siblings || [])
+        .map((c) => ({
+          conversationId: c.id as string,
+          relatedItemTitle: (c.related_item_title as string | null) ?? null,
+          messages: (siblingRows || [])
+            .filter((r) => r.conversation_id === c.id)
+            .map((r) => ({
+              id: r.id,
+              senderId: r.sender_id,
+              senderName: names[r.sender_id] || "(unknown)",
+              text: r.text,
+              sentAt: r.sent_at,
+            })),
+        }))
+        .filter((t) => t.messages.length > 0);
+    }
+  }
+
   return {
     conversationId,
     relatedItemTitle: conversation?.related_item_title ?? null,
     messages,
+    participants,
+    otherThreads,
   };
 }

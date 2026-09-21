@@ -1716,158 +1716,28 @@ function renderFlaggedConversation() {
   const fc = state.flaggedConversation;
   if (!fc) return "";
   const snip = (fc.matchedSnippet || "").trim();
-  const msgs = (fc.messages || []).map((m) => {
-    const hit = snip && String(m.text || "").includes(snip);
+  const line = (m, highlight) => {
+    const hit = highlight && snip && String(m.text || "").includes(snip);
     const when = m.sentAt ? new Date(m.sentAt).toLocaleString() : "";
     return `<div class="approvals-line" style="${hit ? "background:rgba(255,80,80,.15);border-left:3px solid var(--danger);padding-left:8px;" : ""}">
       <strong>${escapeHtml(m.senderName || "")}:</strong> ${escapeHtml(m.text || "")}
       <div class="muted" style="font-size:11px">${escapeHtml(when)}${hit ? " - flagged message" : ""}</div></div>`;
-  }).join("") || `<div class="muted">No messages.</div>`;
+  };
+  const main = (fc.messages || []).map((m) => line(m, true)).join("") || `<div class="muted">No messages.</div>`;
+  const who = (fc.participants || []).map((p) => escapeHtml(p.name)).join(" and ");
+  const others = (fc.otherThreads || []).map((t) => `
+    <div class="muted" style="font-weight:600;margin:14px 0 4px">${escapeHtml(t.relatedItemTitle || "Another conversation")}</div>
+    ${t.messages.map((m) => line(m, true)).join("")}`).join("");
   return `
     <div class="modal-backdrop" id="flagged-backdrop">
-      <div class="modal" style="max-width:560px;max-height:80vh;overflow:auto">
-        <h3>Flagged conversation ${fc.relatedItemTitle ? "- " + escapeHtml(fc.relatedItemTitle) : ""}</h3>
-        ${msgs}
+      <div class="modal" style="max-width:640px;max-height:85vh;overflow:auto">
+        <h3>Flagged conversation${fc.relatedItemTitle ? " - " + escapeHtml(fc.relatedItemTitle) : ""}</h3>
+        ${who ? `<div class="muted" style="margin-bottom:8px">Between ${who}</div>` : ""}
+        ${main}
+        ${others ? `<h3 style="margin-top:18px">Everything else they have said to each other</h3>${others}` : `<div class="muted" style="margin-top:14px">These two people have no other conversations on Horizon.</div>`}
         <div class="actions"><button id="close-flagged-conversation">Close</button></div>
       </div>
     </div>`;
-}
-
-function renderSosAlerts() {
-  const filters = ["active", "flagged", "all"].map((f) => `<button data-sos-filter="${f}" class="${state.sosFilter === f ? "active" : ""}">${f[0].toUpperCase() + f.slice(1)}</button>`).join(" ");
-  const rows = state.sosAlerts.map((a) => `<tr>
-    <td>${escapeHtml(a.userName)}<div class="muted">${new Date(a.activatedAt).toLocaleString()}</div></td>
-    <td><span class="badge ${escapeHtml(a.status)}">${escapeHtml(a.status)}</span>${a.flagged ? ` <span class="badge open" title="${escapeHtml(a.flagReason || "")}">flagged</span>` : ""}${a.preserved ? " (held)" : ""}</td>
-    <td>${escapeHtml(a.emergencyType || "-")}</td>
-    <td>${a.recipients} notified, ${a.acknowledged} seen, ${a.helpContacted} say help contacted</td>
-    <td>${a.hasLocation ? "Yes" : "None"}</td>
-    <td class="row-actions"><button data-sos-open="${a.id}">Open</button></td>
-  </tr>`).join("");
-  return `
-    <div class="panel">
-      <h2>SOS Alerts</h2>
-      <div class="muted" style="margin-bottom:10px">Exact location, identity and the audit trail need the owner role, and every time they are opened it is recorded. Horizon does not contact emergency services itself - only circle members can confirm that.</div>
-      <div style="margin-bottom:12px">${filters} <button id="sos-refresh">Refresh</button></div>
-      <table>
-        <thead><tr><th>User</th><th>Status</th><th>Type</th><th>Circle response</th><th>Location</th><th></th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="6" class="muted">No alerts.</td></tr>`}</tbody>
-      </table>
-    </div>
-    ${renderSosDetail()}`;
-}
-
-function renderSosDetail() {
-  const d = state.sosDetail;
-  if (!d) return "";
-  const loc = d.lastLocation || d.initialLocation;
-  const mapLink = loc ? `https://www.google.com/maps/search/?api=1&query=${loc.latitude},${loc.longitude}` : null;
-  const audit = (d.audit || []).map((a) => `<div class="approvals-line"><span class="muted">${new Date(a.timestamp).toLocaleString()}</span> - <strong>${escapeHtml(a.action)}</strong> <span class="muted">(${escapeHtml(a.actorRole)}${a.actorUserId ? " " + escapeHtml(a.actorUserId.slice(0, 8)) : ""})</span> ${a.metadata && Object.keys(a.metadata).length ? `<span class="muted mono">${escapeHtml(JSON.stringify(a.metadata))}</span>` : ""}</div>`).join("");
-  const recips = (d.recipients || []).map((r) => `<div class="approvals-line">${escapeHtml(r.name)} ${r.phoneNumber ? "(" + escapeHtml(r.phoneNumber) + ")" : ""} - notified ${r.notifiedAt ? new Date(r.notifiedAt).toLocaleTimeString() : "no"}, seen ${r.acknowledgedAt ? new Date(r.acknowledgedAt).toLocaleTimeString() : "no"}${r.helpContactedAt ? ", reports contacting emergency services at " + new Date(r.helpContactedAt).toLocaleTimeString() : ""}</div>`).join("") || `<div class="muted">None</div>`;
-  const u = d.user;
-  return `
-    <div class="modal-backdrop" id="sos-backdrop">
-      <div class="modal" style="max-width:760px;max-height:85vh;overflow:auto">
-        <h3>SOS ${escapeHtml(d.status)} - ${escapeHtml(u ? u.name : "Unknown")}</h3>
-        <div class="muted">Activated ${new Date(d.activatedAt).toLocaleString()} - type ${escapeHtml(d.emergencyType || "not chosen")} - method ${escapeHtml(d.activationMethod)} - ${d.totalAlertsByUser} alert(s) from this user overall</div>
-        ${u ? `<div class="approvals-line">Identity: ${escapeHtml(u.name)} - ${escapeHtml(u.phone || "no phone")} - ${escapeHtml(u.email || "")} - trust level ${escapeHtml(u.trustLevel)}${u.sosRestricted ? " - <strong>SOS RESTRICTED</strong>: " + escapeHtml(u.sosRestrictedReason || "") : ""}</div>` : ""}
-        <div class="approvals-line">Location: ${loc ? `<a href="${mapLink}" target="_blank" rel="noopener">${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)}</a> (accuracy ${loc.accuracy != null ? Math.round(loc.accuracy) + " m" : "unknown"})${d.lastLocation && d.lastLocation.recordedAt ? " last update " + new Date(d.lastLocation.recordedAt).toLocaleString() : ""}` : "no location was ever received"} - ${(d.locations || []).length} fixes recorded</div>
-        ${d.flagged ? `<div class="approvals-line">Flagged: ${escapeHtml(d.flagReason || "")}</div>` : ""}
-        ${d.adminNote ? `<div class="approvals-line">Admin note: ${escapeHtml(d.adminNote)}</div>` : ""}
-        <div class="muted" style="font-weight:600;margin:10px 0 4px">Circle members alerted</div>${recips}
-        <div class="muted" style="font-weight:600;margin:10px 0 4px">Audit trail (append-only)</div>${audit}
-        <div class="row-actions" style="margin-top:14px;flex-wrap:wrap">
-          ${d.flagged ? `<button data-sos-act="unflag">Clear flag</button>` : `<button data-sos-act="flag">Flag for review</button>`}
-          <button data-sos-act="mark_review">Mark for review</button>
-          <button data-sos-act="note">Add note</button>
-          <button data-sos-act="${d.preserved ? "unpreserve" : "preserve"}">${d.preserved ? "Release record hold" : "Preserve record"}</button>
-          ${u ? (u.sosRestricted ? `<button data-sos-restrict="restore">Restore SOS access</button>` : `<button data-sos-restrict="restrict">Restrict SOS access</button>`) : ""}
-        </div>
-        <div class="actions"><button id="close-sos-detail">Close</button></div>
-      </div>
-    </div>`;
-}
-
-function wireSosActions() {
-  document.querySelectorAll("[data-sos-filter]").forEach((b) => {
-    b.onclick = async () => {
-      state.sosFilter = b.dataset.sosFilter;
-      try { await loadSosAlerts(); } catch (e) { toast(e.message || String(e), "error"); }
-      render();
-    };
-  });
-  const rf = document.getElementById("sos-refresh");
-  if (rf) rf.onclick = async () => {
-    try { await loadSosAlerts(); } catch (e) { toast(e.message || String(e), "error"); }
-    render();
-  };
-  document.querySelectorAll("[data-sos-open]").forEach((b) => { b.onclick = () => openSosDetail(b.dataset.sosOpen); });
-  const d = state.sosDetail;
-  const close = () => { state.sosDetail = null; render(); };
-  const cb = document.getElementById("close-sos-detail");
-  if (cb) cb.onclick = close;
-  const bd = document.getElementById("sos-backdrop");
-  if (bd) bd.onclick = (ev) => { if (ev.target === bd) close(); };
-  if (!d) return;
-  document.querySelectorAll("[data-sos-act]").forEach((b) => {
-    b.onclick = () => {
-      const act = b.dataset.sosAct;
-      let note = "";
-      if (act === "flag" || act === "note") {
-        note = prompt(act === "flag" ? "Reason for flagging this alert:" : "Note:") || "";
-        if (!note.trim()) return;
-      }
-      sosAction(d.id, act, note);
-    };
-  });
-  document.querySelectorAll("[data-sos-restrict]").forEach((b) => {
-    b.onclick = () => {
-      const restrict = b.dataset.sosRestrict === "restrict";
-      const reason = prompt(restrict ? "Reason for restricting this user's SOS access (an admin decision, recorded in the audit trail):" : "Reason for restoring SOS access:") || "";
-      if (!reason.trim()) return;
-      sosRestrict(d.user.uid, restrict, reason, d.id);
-    };
-  });
-}
-
-function renderDeliveries() {
-  const rows = state.deliveries.map((d) => {
-    const photo = d.handoverPhotoUrl
-      ? `<a href="#" data-delivery-photo="${d.id}"><img src="${escapeHtml(d.handoverPhotoUrl)}" alt="Handover photo" style="width:64px;height:64px;object-fit:cover;border-radius:6px;display:block"/></a>`
-      : (d.hasHandoverPhoto ? `<span class="muted">Could not load</span>` : `<span class="muted">None</span>`);
-    const price = d.agreedAmountKobo ? "N" + (d.agreedAmountKobo / 100).toLocaleString() : "-";
-    return `<tr>
-      <td>${escapeHtml(d.deal?.title || "(deal)")}<div class="muted">${new Date(d.createdAt).toLocaleString()}</div></td>
-      <td>Buyer: ${escapeHtml(d.buyerName)}<div class="muted">Seller: ${escapeHtml(d.sellerName)}</div></td>
-      <td>${escapeHtml(d.partnerName)}</td>
-      <td><span class="badge ${escapeHtml(d.status)}">${escapeHtml(d.status)}</span></td>
-      <td>${price}</td>
-      <td>${photo}</td>
-    </tr>`;
-  }).join("");
-  return `
-    <div class="panel">
-      <h2>In-app deliveries</h2>
-      <table>
-        <thead><tr><th>Deal</th><th>Buyer / Seller</th><th>Partner</th><th>Status</th><th>Agreed price</th><th>Handover photo</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="6" class="muted">No deliveries yet.</td></tr>`}</tbody>
-      </table>
-    </div>
-    ${state.deliveryPhoto ? `<div class="modal-backdrop" id="delivery-photo-backdrop"><div class="modal" style="max-width:720px"><img src="${escapeHtml(state.deliveryPhoto)}" style="width:100%;border-radius:8px"/><div class="actions"><button id="close-delivery-photo">Close</button></div></div></div>` : ""}`;
-}
-
-function wireDeliveryActions() {
-  document.querySelectorAll("[data-delivery-photo]").forEach((a) => {
-    a.onclick = (ev) => {
-      ev.preventDefault();
-      const d = state.deliveries.find((x) => x.id === a.dataset.deliveryPhoto);
-      if (d) { state.deliveryPhoto = d.handoverPhotoUrl; render(); }
-    };
-  });
-  const close = () => { state.deliveryPhoto = null; render(); };
-  const cb = document.getElementById("close-delivery-photo");
-  if (cb) cb.onclick = close;
-  const bd = document.getElementById("delivery-photo-backdrop");
-  if (bd) bd.onclick = (ev) => { if (ev.target === bd) close(); };
 }
 
 function renderContactFlags() {

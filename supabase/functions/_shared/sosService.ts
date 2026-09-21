@@ -9,9 +9,12 @@ import { notifyUser } from "./notificationService.ts";
 // What this deliberately does NOT do:
 //  - claim emergency services were contacted (only a circle member confirming
 //    it, in the app, sets help_contacted_at - and it's always attributed);
-//  - notify people who aren't on Horizon yet (there is no SMS provider; those
-//    contacts stay 'pending' until they sign up and accept, and activation
-//    reports how many people could not be reached);
+//  - notify people who aren't on Horizon (there is no SMS provider), which is
+//    why only existing Horizon users can be added to a circle. Anyone who IS a
+//    user - verified or not - is an active recipient the moment the owner adds
+//    them: circles are often set up at the point of emergency, so there is no
+//    acceptance step to wait for. (Only the OWNER must be verified.) A contact
+//    can leave a circle at any time;
 //  - expose a location to anyone who isn't the owner, an accepted+active
 //    circle member that was snapshotted onto THAT alert, or an authorised admin.
 
@@ -192,10 +195,13 @@ export async function addContact(
     // the owner typed, and Horizon users are reached through the app.
   } else if (phone) {
     const { data: matches } = await supabase.from("profiles").select("uid, name").in("phone", phoneVariants(phone)).limit(1);
-    if (matches && matches.length > 0) {
-      contactUserId = matches[0].uid;
-      contactName = contactName || matches[0].name || "Horizon user";
+    if (!matches || matches.length === 0) {
+      throw new SosError(
+        "That phone number isn't on Horizon. Only people who have a Horizon account can receive your emergency alerts - ask them to sign up first."
+      );
     }
+    contactUserId = matches[0].uid;
+    contactName = contactName || matches[0].name || "Horizon user";
   } else {
     throw new SosError("Choose a Horizon user or enter a phone number.");
   }
@@ -214,9 +220,10 @@ export async function addContact(
       contact_name: contactName,
       phone_number: phone,
       relationship,
-      status: "pending",
-      alerts_enabled: false,
-      invite_code: contactUserId ? null : newInviteCode(),
+      // Active immediately: any Horizon user the owner adds receives alerts.
+      status: "active",
+      alerts_enabled: true,
+      invite_code: null,
     })
     .select("*")
     .single();
@@ -234,10 +241,10 @@ export async function addContact(
   if (contactUserId) {
     await notifyUser(supabase, contactUserId, {
       type: "security_circle_invite",
-      title: "Emergency contact request",
+      title: "You're an emergency contact",
       body:
         `${owner.name || "Someone"} has added you as an emergency contact. If they activate Horizon SOS you may receive ` +
-        "emergency notifications and location information to help coordinate assistance. Open Security Circle to accept or decline.",
+        "emergency notifications and location information to help coordinate assistance. You can leave their circle any time from Security Circle.",
       relatedType: "security_circle",
       relatedId: row.id,
     }).catch((err) => console.error("notifyUser (circle invite) failed:", err));
@@ -257,22 +264,14 @@ export async function listCircle(supabase: SupabaseClient, uid: string) {
     .order("created_at", { ascending: true });
   if (error) throw error;
 
-  // Requests for me to accept: addressed to my user id, or to my phone
-  // number before I had an account.
-  const invitesQuery = supabase.from(CONTACTS).select("*").eq("status", "pending");
-  const { data: invites, error: invErr } = profile?.phone
-    ? await invitesQuery.or(`contact_user_id.eq.${uid},and(contact_user_id.is.null,phone_number.in.(${phoneVariants(profile.phone).join(",")}))`)
-    : await invitesQuery.eq("contact_user_id", uid);
-  if (invErr) throw invErr;
-
   const { data: trusting, error: trErr } = await supabase
     .from(CONTACTS)
     .select("*")
     .eq("contact_user_id", uid)
-    .eq("status", "active");
+    .in("status", ["pending", "active"]);
   if (trErr) throw trErr;
 
-  const ownerIds = [...new Set([...(invites || []), ...(trusting || [])].map((r: Row) => r.owner_user_id))];
+  const ownerIds = [...new Set((trusting || []).map((r: Row) => r.owner_user_id))];
   const names = new Map<string, string>();
   if (ownerIds.length) {
     const { data: ps } = await supabase.from("profiles").select("uid,name").in("uid", ownerIds);
@@ -283,14 +282,7 @@ export async function listCircle(supabase: SupabaseClient, uid: string) {
     verified: Boolean(profile?.trust_level && profile.trust_level !== "basic"),
     restricted: profile?.sos_restricted === true,
     contacts: (mine || []).map(toContact),
-    invitations: (invites || [])
-      .filter((r: Row) => r.owner_user_id !== uid)
-      .map((r: Row) => ({
-        id: r.id,
-        ownerName: names.get(r.owner_user_id) ?? "A Horizon user",
-        relationship: r.relationship,
-        createdAt: r.created_at,
-      })),
+    invitations: [],
     trustedBy: (trusting || []).map((r: Row) => ({
       id: r.id,
       ownerName: names.get(r.owner_user_id) ?? "A Horizon user",
@@ -454,13 +446,12 @@ export async function activateSos(
     .from(CONTACTS)
     .select("*")
     .eq("owner_user_id", uid)
-    .eq("status", "active")
-    .eq("alerts_enabled", true)
+    .in("status", ["pending", "active"])
     .not("contact_user_id", "is", null);
   if (cErr) throw cErr;
   if (!contacts || contacts.length === 0) {
     throw new SosError(
-      "Nobody in your Security Circle can receive alerts yet. Add an emergency contact who has accepted before using Horizon SOS.",
+      "Your Security Circle is empty. Add at least one person who has a Horizon account before using Horizon SOS.",
       400,
       "NO_CONTACTS"
     );
@@ -586,7 +577,8 @@ export async function activateSos(
     .from(CONTACTS)
     .select("id", { count: "exact", head: true })
     .eq("owner_user_id", uid)
-    .eq("status", "pending");
+    .eq("status", "pending")
+    .is("contact_user_id", null);
 
   return await ownerView(supabase, alert, { notifiedCount: notified.length, attemptedCount: contacts.length, unreachableCount: unreachable ?? 0 });
 }
@@ -673,8 +665,8 @@ export async function getAlert(supabase: SupabaseClient, requesterUid: string, a
   if (!rec) throw new SosError("Alert not found.", 404);
 
   // Removed from the circle mid-alert => access ends immediately.
-  const { data: contact } = await supabase.from(CONTACTS).select("status, alerts_enabled").eq("id", rec.contact_id).maybeSingle();
-  if (!contact || contact.status !== "active" || !contact.alerts_enabled) throw new SosError("Alert not found.", 404);
+  const { data: contact } = await supabase.from(CONTACTS).select("status").eq("id", rec.contact_id).maybeSingle();
+  if (!contact || !["pending", "active"].includes(contact.status)) throw new SosError("Alert not found.", 404);
 
   if (!rec.viewed_at) {
     await supabase.from(RECIPIENTS).update({ viewed_at: new Date().toISOString() }).eq("id", rec.id);
@@ -729,7 +721,7 @@ export async function listAlertsForRecipient(supabase: SupabaseClient, uid: stri
   const { data: ps } = await supabase.from("profiles").select("uid,name").in("uid", live.map((a) => a.user_id));
   const names = new Map<string, string>((ps || []).map((p: Row) => [p.uid, p.name || "A Horizon user"]));
   const activeContactIds = new Set(
-    ((await supabase.from(CONTACTS).select("id").in("id", recs.map((r: Row) => r.contact_id)).eq("status", "active")).data || []).map((c: Row) => c.id)
+    ((await supabase.from(CONTACTS).select("id").in("id", recs.map((r: Row) => r.contact_id)).in("status", ["pending", "active"])).data || []).map((c: Row) => c.id)
   );
   return live
     .filter((a) => recs.some((r: Row) => r.emergency_alert_id === a.id && activeContactIds.has(r.contact_id)))
@@ -752,8 +744,8 @@ async function requireRecipient(supabase: SupabaseClient, uid: string, alertId: 
     .eq("recipient_user_id", uid)
     .maybeSingle();
   if (!rec) throw new SosError("Alert not found.", 404);
-  const { data: contact } = await supabase.from(CONTACTS).select("status, alerts_enabled").eq("id", rec.contact_id).maybeSingle();
-  if (!contact || contact.status !== "active" || !contact.alerts_enabled) throw new SosError("Alert not found.", 404);
+  const { data: contact } = await supabase.from(CONTACTS).select("status").eq("id", rec.contact_id).maybeSingle();
+  if (!contact || !["pending", "active"].includes(contact.status)) throw new SosError("Alert not found.", 404);
   return { alert, rec };
 }
 
